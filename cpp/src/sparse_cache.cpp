@@ -6,10 +6,13 @@
 
 namespace tsp {
 
-KVCacheManager::KVCacheManager(double threshold, bool enable_compression, int head_dim) 
-    : threshold_(threshold), enable_compression_(enable_compression) {
+KVCacheManager::KVCacheManager(double threshold, bool enable_compression, bool enable_consolidation, int head_dim) 
+    : threshold_(threshold), enable_compression_(enable_compression), enable_consolidation_(enable_consolidation) {
     if (enable_compression_) {
         compressor_ = std::make_unique<SubManifoldAutoencoder>(head_dim);
+    }
+    if (enable_consolidation_) {
+        consolidator_ = std::make_unique<MemoryConsolidator>();
     }
 }
 
@@ -141,6 +144,18 @@ std::vector<std::pair<mlx::core::array, mlx::core::array>> KVCacheManager::updat
         
         if (island_physical_indices.empty()) {
             return kv_caches;
+        }
+
+        // --- V4 Memory Consolidation (Test-Time Training) ---
+        if (enable_consolidation_ && consolidator_) {
+            float salience = consolidator_->evaluate_salience(attention_matrix, island_physical_indices);
+            if (salience > 0.5f) { // High Salience Threshold
+                auto island_array = mlx::core::array(island_physical_indices.data(), {static_cast<int>(island_physical_indices.size())}, mlx::core::int32);
+                auto k_island = mlx::core::take(kv_caches[0].first, island_array, 2);
+                auto v_island = mlx::core::take(kv_caches[0].second, island_array, 2);
+                
+                consolidator_->consolidate(k_island, v_island);
+            }
         }
         
         std::vector<std::pair<mlx::core::array, mlx::core::array>> pruned_caches;

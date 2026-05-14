@@ -23,6 +23,7 @@ add_library(tsp_core STATIC
     src/position_tracker.cpp
     src/attention_hook.cpp
     src/compression.cpp
+    src/consolidation.cpp
 )
 
 target_link_libraries(tsp_core PRIVATE mlx tau_gate)
