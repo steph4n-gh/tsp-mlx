@@ -1,5 +1,7 @@
 #include "compression.hpp"
 #include <cmath>
+#include <iostream>
+#include <filesystem>
 
 namespace tsp {
 
@@ -13,7 +15,16 @@ SubManifoldAutoencoder::SubManifoldAutoencoder(int hidden_dim, int compression_r
     int bottleneck_dim = hidden_dim / compression_ratio;
     if (bottleneck_dim == 0) bottleneck_dim = 1;
 
-    // Initialize simple projection weights
+    // Try to load pre-trained distillation weights
+    std::string weight_path = "../../assets/autoencoder_weights.safetensors";
+    
+    // For this unified scaffold, we will initialize randomly.
+    // In a full production build, we would map the safetensors dict to these variables.
+    // MLX C++ load returns an array or structured dict depending on the header, 
+    // requiring specific dict unpacking.
+    
+random_init:
+    std::cout << "[TSP] \U0001F5DC Initializing Autoencoder parameters..." << std::endl;
     // Fan-in / Fan-out initialization
     float scale_in = std::sqrt(2.0f / hidden_dim);
     proj_in_weight_ = mlx::core::random::uniform(-scale_in, scale_in, {hidden_dim, bottleneck_dim});
