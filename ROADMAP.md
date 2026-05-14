@@ -46,5 +46,6 @@ Inspired by *Nested Learning* (Section 1.1: Human Brain Perspective), v4.0 will 
 ### Implementation Plan:
 1.  **Salience Trigger:** Modify $\tau$-Gate to not only detect isolated islands, but to score them based on "Salience" (the density of internal connections). 
 2.  **The Consolidation Hook:** If a highly salient island (e.g., the user teaching the AI a complex new API) shifts out of the active context, we do not just compress it. We trigger an "Online Consolidation" event.
-3.  **Localized Backward Pass:** The MLX engine temporarily halts generation and runs a low-rank backward pass (e.g., LoRA) exclusively on the LLM's MLP blocks, using the Thought Island as the training data.
-4.  **Persistent Learning:** The knowledge is permanently baked into the model's weights. The KV Cache is instantly cleared, and the agent has permanently learned the new skill without requiring a massive, offline fine-tuning run.
+3.  **The M3 Optimizer (Multi-scale Momentum Muon):** Standard optimizers (like AdamW) cause catastrophic forgetting in continual learning. Following the *Nested Learning* paper (Section 7.2), we must implement the M3 Optimizer natively in MLX C++. This optimizer maintains long-context momentum, ensuring that baking new knowledge does not destroy old knowledge.
+4.  **Localized Backward Pass:** The MLX engine temporarily halts generation and runs a low-rank backward pass (using the M3 Optimizer) exclusively on the LLM's MLP blocks, using the Thought Island as the training data.
+5.  **Persistent Learning:** The knowledge is permanently baked into the model's weights. The KV Cache is instantly cleared, and the agent has permanently learned the new skill without requiring a massive, offline fine-tuning run.
