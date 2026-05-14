@@ -53,6 +53,7 @@ make -j4
 
 ## Documentation
 *   **[What is TSP? (The Definitive Summary)](./docs/product_summary.md)**: An explanation of what the product is, what it does, and who it is for, scaled from a 6-year-old's understanding up to expert-level technical reality.
+*   **[Theoretical Foundation: Nested Learning & TSP](./docs/nested_learning_analysis.md)**: An analysis connecting the TSP architecture to Google Research's *Nested Learning* paradigm.
 *   **[Deep Dive: Configuration, Context, and Multi-Turn Survival](./docs/deep_dive.md)**: A technical, no-nonsense guide on how TSP integrates with LLMs, how it mathematically curates context, and why aggressive pruning doesn't break multi-turn chat templates.
 
 ## License
