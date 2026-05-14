@@ -32,6 +32,7 @@ TSP is designed for scenarios where LLMs run continuously and accumulate unbound
 *   **Terminal Output Filtering:** When a CLI agent reads thousands of lines of logs (e.g., from `npm install` or test suites), TSP identifies the logs as an isolated block once the agent moves to the next task and prunes them from the active cache, retaining only the relevant context.
 *   **Context-Switching in IDEs:** When switching between unrelated files or tasks, the semantic manifold shifts. TSP evicts the previous task's isolated tokens while preserving protected "sink" tokens (such as global project instructions and system prompts).
 *   **Reducing Context Drag:** Continuously pruning irrelevant snippets prevents the context window from growing indefinitely, keeping inference times and token costs stable during long sessions.
+*   **Instant Recovery (Checkpointing):** TSP can serialize its highly-compressed KV cache and topological map to disk (`safetensors` + `json`). This allows autonomous agents to survive process restarts and instantly resume their context without spending minutes re-processing days of log files.
 
 ## Performance Profile (Apple Silicon)
 
