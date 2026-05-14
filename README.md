@@ -34,16 +34,6 @@ TSP is designed for scenarios where LLMs run continuously and accumulate unbound
 *   **Reducing Context Drag:** Continuously pruning irrelevant snippets prevents the context window from growing indefinitely, keeping inference times and token costs stable during long sessions.
 *   **Instant Recovery (Checkpointing):** TSP can serialize its highly-compressed KV cache and topological map to disk (`safetensors` + `json`). This allows autonomous agents to survive process restarts and instantly resume their context without spending minutes re-processing days of log files.
 
-## Performance Profile (Apple Silicon)
-
-| Sequence Length | Avg. Update Latency |
-| :--- | :--- |
-| 128 tokens | ~40ms |
-| 512 tokens | ~615ms |
-| 2048 tokens | ~10.9s |
-
-*Note: Latency is proportional to sequence length due to the $O(N^2)$ nature of full spectral bisection. In practice, graph updates are deferred to intervals (e.g., every 64 tokens).*
-
 ## Security & Supply Chain
 
 *   **Zero-Dependency Rust Core:** The mathematical library (`tau-gate`) is built without external dependencies (no crates) to minimize supply-chain risks.
