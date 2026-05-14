@@ -18,13 +18,28 @@ SubManifoldAutoencoder::SubManifoldAutoencoder(int hidden_dim, int compression_r
     // Try to load pre-trained distillation weights
     std::string weight_path = "../../assets/autoencoder_weights.safetensors";
     
-    // For this unified scaffold, we will initialize randomly.
-    // In a full production build, we would map the safetensors dict to these variables.
-    // MLX C++ load returns an array or structured dict depending on the header, 
-    // requiring specific dict unpacking.
+    if (std::filesystem::exists(weight_path)) {
+        std::cout << "[TSP] \U0001F5DC Loading pre-trained Context Distillation weights..." << std::endl;
+        auto st_load = mlx::core::load_safetensors(weight_path);
+        auto weights = st_load.first;
+        
+        // We assume we are loading the keys autoencoder for this unified scaffold
+        if (weights.find("k_proj_in.weight") != weights.end()) {
+            proj_in_weight_ = mlx::core::transpose(weights.at("k_proj_in.weight"));
+            proj_in_bias_ = weights.at("k_proj_in.bias");
+            proj_out_weight_ = mlx::core::transpose(weights.at("k_proj_out.weight"));
+            proj_out_bias_ = weights.at("k_proj_out.bias");
+            
+            // Evaluate to realize
+            mlx::core::eval({proj_in_weight_, proj_in_bias_, proj_out_weight_, proj_out_bias_});
+            std::cout << "[TSP] \U0001F5DC Autoencoder weights loaded successfully!" << std::endl;
+            return;
+        } else {
+             std::cerr << "[TSP] Warning: Pre-trained weights file missing keys. Falling back to random init." << std::endl;
+        }
+    }
     
-random_init:
-    std::cout << "[TSP] \U0001F5DC Initializing Autoencoder parameters..." << std::endl;
+    std::cout << "[TSP] \U0001F5DC No pre-trained weights found. Initializing random Autoencoder..." << std::endl;
     // Fan-in / Fan-out initialization
     float scale_in = std::sqrt(2.0f / hidden_dim);
     proj_in_weight_ = mlx::core::random::uniform(-scale_in, scale_in, {hidden_dim, bottleneck_dim});
