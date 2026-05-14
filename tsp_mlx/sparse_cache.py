@@ -22,9 +22,30 @@ class KVCacheManager:
     def __init__(self, cortex_hook):
         self.cortex_hook = cortex_hook
         self.position_tracker = SparsePositionTracker()
+        self.inherited_sinks = set()
+        self.inheritance_threshold = 0.8
 
     def update(self, attention_matrix: mx.array, kv_caches: List[Tuple[mx.array, mx.array]], sinks: List[int]) -> List[Tuple[mx.array, mx.array]]:
-        decision = self.cortex_hook.evaluate_attention(attention_matrix, sinks, self.position_tracker.position_ids)
+        # --- Fuzzy Sinks Logic ---
+        a_2d = mx.mean(attention_matrix, axis=1)[0]
+        if len(a_2d.shape) == 2 and a_2d.shape[0] == 1:
+            a_sq = mx.squeeze(a_2d, axis=0) # Shape: [S] for decode
+        else:
+            a_sq = a_2d # Shape: [S, S] for prefill
+            
+        if len(a_sq.shape) == 1:
+            import numpy as np
+            np_a_sq = np.array(a_sq)
+            high_attn_indices = np.where(np_a_sq > self.inheritance_threshold)[0].tolist()
+            for rel_idx in high_attn_indices:
+                if rel_idx < len(self.position_tracker.position_ids):
+                    abs_idx = self.position_tracker.position_ids[rel_idx]
+                    if abs_idx not in sinks:
+                        self.inherited_sinks.add(abs_idx)
+        
+        combined_sinks = list(set(sinks) | self.inherited_sinks)
+
+        decision = self.cortex_hook.evaluate_attention(attention_matrix, combined_sinks, self.position_tracker.position_ids)
         action = decision.get("action", "ALLOW")
         island_indices = decision.get("island_indices", [])
 
@@ -34,7 +55,7 @@ class KVCacheManager:
         if action == "GARBAGE_COLLECT" and len(island_indices) > 0:
             seq_len = attention_matrix.shape[-1]
             island_set = set(island_indices)
-            sink_set = set(sinks)
+            sink_set = set(combined_sinks)
             
             # ARMOR: Never drop a sink, even if Rust flags it
             keep_indices = [

@@ -14,12 +14,16 @@ class CortexHook:
             daemon_path = os.path.join(cache_dir, "tau-gate")
             
         self.daemon_path = daemon_path
-        self.eval_interval = eval_interval
+        self.base_interval = eval_interval
+        self.current_interval = eval_interval
+        self.min_interval = max(4, eval_interval // 4)
+        self.max_interval = eval_interval * 4
         self.threshold = threshold
         self.threat_threshold = threat_threshold
         self.token_counter = 0
         self.edges = set()
         self.last_lambda_2 = 0.0
+        self.lambda_2_history = []
         
         self._ensure_daemon_exists()
         
@@ -70,7 +74,7 @@ class CortexHook:
                     self.edges.add((source_abs, target_abs))
                     self.edges.add((target_abs, source_abs))
                     
-        if self.token_counter % self.eval_interval != 0:
+        if self.token_counter % self.current_interval != 0:
             return {"action": "ALLOW", "island_indices": []}
 
         payload = {
@@ -87,7 +91,25 @@ class CortexHook:
             raise RuntimeError("CortexHook: Daemon connection lost.")
             
         decision = json.loads(response_line)
-        self.last_lambda_2 = decision.get("connectivity_score", 0.0)
+        current_l2 = decision.get("connectivity_score", 0.0)
+        
+        # Adaptive Frequency Logic
+        self.lambda_2_history.append(current_l2)
+        if len(self.lambda_2_history) > 5:
+            self.lambda_2_history.pop(0)
+            
+        if len(self.lambda_2_history) >= 2:
+            delta_l2 = abs(self.lambda_2_history[-1] - self.lambda_2_history[-2])
+            
+            # High volatility -> semantic shift -> check more frequently
+            if delta_l2 > 0.05:
+                self.current_interval = max(self.min_interval, self.current_interval // 2)
+            # Low volatility -> stable manifold -> check less frequently
+            elif delta_l2 < 0.001 and current_l2 > 0.1:
+                self.current_interval = min(self.max_interval, self.current_interval * 2)
+                
+        self.last_lambda_2 = current_l2
+        decision["eval_interval"] = self.current_interval # Pass interval for instrumentation
         return decision
 
     def __del__(self):
