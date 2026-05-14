@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+
+# C++ Build
+cpp/build/
+*.o
+*.a
+*.dylib
+*.so
+
+# MLX & Core
+.cache/
+tool-outputs/
+
+# macOS
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
