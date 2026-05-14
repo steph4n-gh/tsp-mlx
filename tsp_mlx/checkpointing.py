@@ -7,18 +7,23 @@ def save_tsp_state(
     save_dir: str,
     kv_caches: List[Any],
     position_ids: List[int],
-    edges: set
+    edges: set,
+    inherited_sinks: set = None
 ):
     """
     Serializes the highly-compressed TSP KV cache and topological map to disk.
     """
+    if inherited_sinks is None:
+        inherited_sinks = set()
+        
     os.makedirs(save_dir, exist_ok=True)
     
     # 1. Save Topological Map (Position IDs and Edges)
     map_path = os.path.join(save_dir, "topology.json")
     topology = {
         "position_ids": position_ids,
-        "edges": list(edges) # Convert set back to list for JSON
+        "edges": list(edges), # Convert set back to list for JSON
+        "inherited_sinks": list(inherited_sinks)
     }
     with open(map_path, "w") as f:
         json.dump(topology, f)
@@ -63,6 +68,7 @@ def load_tsp_state(
     kv_manager.position_tracker.position_ids = topology["position_ids"]
     kv_manager.position_tracker.current_pos = max(topology["position_ids"]) + 1 if topology["position_ids"] else 0
     kv_manager.cortex_hook.edges = set(tuple(e) for e in topology.get("edges", []))
+    kv_manager.inherited_sinks = set(topology.get("inherited_sinks", []))
     
     # 2. Restore KV Cache Tensors
     tensor_dict = mx.load(cache_path)
