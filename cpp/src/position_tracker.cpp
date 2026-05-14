@@ -12,13 +12,17 @@ void SparsePositionTracker::step(int num_tokens) {
     }
 }
 
-void SparsePositionTracker::prune(const std::vector<int>& island_ids) {
+void SparsePositionTracker::prune(const std::vector<int>& island_ids, int compressed_index) {
     std::set<int> island_set(island_ids.begin(), island_ids.end());
-    position_ids_.erase(
-        std::remove_if(position_ids_.begin(), position_ids_.end(),
-            [&island_set](int id) { return island_set.count(id) > 0; }),
-        position_ids_.end()
-    );
+    std::vector<int> new_positions;
+    for (int pid : position_ids_) {
+        if (island_set.count(pid) == 0) {
+            new_positions.push_back(pid);
+        } else if (compressed_index != -1 && pid == compressed_index) {
+            new_positions.push_back(pid);
+        }
+    }
+    position_ids_ = new_positions;
 }
 
 mlx::core::array SparsePositionTracker::get_positions() const {

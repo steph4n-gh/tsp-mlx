@@ -4,9 +4,10 @@
 #include <mlx/mlx.h>
 
 int main() {
-    std::cout << "[TSP] Initializing C++ Spectral Pruner..." << std::endl;
+    std::cout << "[TSP] Initializing C++ Spectral Pruner with Topological Compression..." << std::endl;
     
-    tsp::KVCacheManager manager(0.015);
+    // Enable compression mode and specify head_dim (64)
+    tsp::KVCacheManager manager(0.015, true, 64);
     
     // Mock data for testing
     // 10 tokens, each attending to the past
