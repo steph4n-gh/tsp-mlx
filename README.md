@@ -4,12 +4,25 @@
 
 TSP manages Large Language Model (LLM) KV caches by using spectral graph theory to identify and evict isolated token clusters. It maintains a bounded VRAM footprint by keeping a topologically connected context.
 
-## Architecture
+---
+
+> ### 👦 **Explain Like I'm 6**
+> Imagine an AI is like a student taking a really, really long test. To answer the questions, the student has to keep all the information they've read inside a tiny backpack (their memory). 
+> 
+> Normally, when the backpack gets full, the student either has to stop taking the test, or they have to throw away the *oldest* notes—even if those notes contain the most important instructions!
+> 
+> **TSP is a smart organizer for the backpack.** Instead of throwing away the oldest notes, it looks at everything in the bag and figures out which notes are completely unrelated to what the student is thinking about *right now*. It throws away the useless distraction notes (like a random math formula during a history essay) so the student never runs out of room and never forgets the important instructions.
+
+---
+
+## Architecture & Dependencies
 
 TSP is built as a C++ library that integrates with the MLX framework.
 
+**Core Dependency: $\tau$-Gate**
+TSP is fundamentally dependent on [**$\tau$-Gate**](https://github.com/steph4n-gh/tau-gate), which serves as its mathematical core. 
 1.  **MLX C++ Integration:** Directly interfaces with the MLX C++ API to manage KV cache tensors.
-2.  **$\tau$-Gate:** A Rust static library that performs spectral bisection on the attention graph.
+2.  **$\tau$-Gate Engine:** The `tau-gate` Rust static library is required to perform the spectral bisection on the attention graph.
 3.  **FFI Bridge:** C++ communicates with the Rust engine via C FFI to avoid inter-process communication overhead.
 
 ## Use Cases for Persistent Agents
