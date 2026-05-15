@@ -183,6 +183,20 @@ class CortexHook:
                 elif delta_l2 < 0.001 and current_l2 > 0.1:
                     self.current_interval = min(self.max_interval, self.current_interval * 2)
         
+        # --- Context Budget Fallback ---
+        if over_budget and (decision["action"] == "ALLOW" or len(decision["island_indices"]) < 8):
+            excess = len(position_ids) - getattr(self, "max_context_budget", 4096)
+            if len(decision["island_indices"]) < excess:
+                decision["action"] = "GARBAGE_COLLECT"
+                sink_set = set(sinks) if sinks else set()
+                immune_set = set(position_ids[-50:]) if len(position_ids) > 50 else set()
+                
+                for pid in position_ids:
+                    if pid not in sink_set and pid not in immune_set and pid not in decision["island_indices"]:
+                        decision["island_indices"].append(pid)
+                        if len(decision["island_indices"]) >= excess:
+                            break
+                            
         decision["eval_interval"] = self.current_interval
         return decision
 

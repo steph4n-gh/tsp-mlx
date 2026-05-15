@@ -54,14 +54,20 @@ async def main():
         print(f"Failed to load model. Error: {e}")
         return
 
+    from tsp_mlx.generate import setup_tsp
+    
     # Setup aggressive pruning manager for the demo
-    hook = CortexHook(eval_interval=5, threshold=0.99)
-    manager = KVCacheManager(hook, model=model, enable_compression=True, enable_consolidation=True, head_dim=128)
+    manager = setup_tsp(model, head_dim=128, enable_compression=True, enable_consolidation=True)
+    manager.cortex_hook.current_interval = 5
+    manager.cortex_hook.threshold = 0.05
+    manager.cortex_hook.max_context_budget = 1024
     manager.consolidator.salience_threshold = 0.0 # Force TTT for demo
-    model._tsp_kv_manager = manager
+
+    with open("IMMUTABLE_AGENT_LAUNCH.md", "r") as f:
+        launch_doc = f.read()
 
     chat_history = [
-        {"role": "system", "content": "You are an expert AI Software Engineer. You read codebases and fix bugs."}
+        {"role": "system", "content": f"You are the Immutable Agent. You are governed by Spectral Graph Theory. Your mission is to provide secure, autonomous software engineering. Here is your operational manifesto:\n\n{launch_doc}"}
     ]
     
     # Simulate an agent "reading" a massive codebase file by file

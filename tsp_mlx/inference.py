@@ -55,9 +55,9 @@ def patch_attention_for_extraction(model: nn.Module):
                 
                 B, L, _ = queries.shape
                 
-                # 🛑 FIX: Prevent OOM by skipping O(N^2) extraction during prefill.
-                # Only compute the manual attention matrix during decode (L == 1).
-                if L == 1 and hasattr(model, '_tsp_kv_manager') and model._tsp_kv_manager is not None:
+                # 🛑 FIX: Prevent OOM by skipping O(N^2) extraction during massive prefill.
+                # Compute the manual attention matrix if L is reasonably small to build the initial graph.
+                if L < 4096 and hasattr(model, '_tsp_kv_manager') and model._tsp_kv_manager is not None:
                     n_heads = getattr(self.orig, "n_heads", 1)
                     n_kv_heads = getattr(self.orig, "n_kv_heads", n_heads)
                     

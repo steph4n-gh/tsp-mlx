@@ -26,7 +26,7 @@ def patch_rope_for_sparse_positions(model: nn.Module, tracker: SparsePositionTra
             rope_cls = rope_layer.__class__
             
             class PatchedRoPE(rope_cls):
-                def __call__(self, x, offset):
+                def __call__(self, x, offset=0, **kwargs):
                     seq_len = x.shape[2]
                     
                     if hasattr(model, "_tsp_kv_manager") and model._tsp_kv_manager is not None:
