@@ -3,12 +3,12 @@ import mlx.core as mx
 
 class VarianceCompressor:
     """
-    A deterministic compressor that uses variance-weighted approximation
-    to extract the principal semantic component of a KV cache 'Thought Island'.
-    Requires no training and guarantees mathematical stability.
+    A stochastic compressor that uses variance-weighted approximation
+    with an optional 'tau wiggle' to extract the principal semantic component.
     """
-    def __init__(self, hidden_dim: int):
+    def __init__(self, hidden_dim: int, tau_wiggle: float = 0.05):
         self.hidden_dim = hidden_dim
+        self.tau_wiggle = tau_wiggle
         
     def __call__(self, island_tensors: mx.array) -> mx.array:
         """
@@ -29,6 +29,22 @@ class VarianceCompressor:
         # Highly variant tokens carry more 'signal' than average tokens.
         token_variance = mx.sum(mx.square(centered_x), axis=-1, keepdims=True) # [B, H, L, 1]
         
+        # 🛑 FIX: Inject 'Tau Wiggle' (Stochastic Perturbation)
+        # Guards against Feature Collapse while preserving Paging Stability
+        if self.tau_wiggle > 0.0:
+            # We scale the noise amplitude by the average variance of the island.
+            # This ensures the wiggle is strictly proportional (max ~5% distortion)
+            # preventing the semantic anchor from losing its structural identity.
+            mean_var = mx.mean(token_variance, axis=2, keepdims=True)
+            noise = mx.random.uniform(
+                shape=token_variance.shape, 
+                low=-self.tau_wiggle, 
+                high=self.tau_wiggle,
+                dtype=token_variance.dtype
+            ) * mean_var
+            # Ensure no negative variances
+            token_variance = mx.maximum(token_variance + noise, mx.zeros_like(token_variance))
+        
         # Normalize weights
         weights = token_variance / (mx.sum(token_variance, axis=2, keepdims=True) + 1e-6)
         
@@ -37,13 +53,13 @@ class VarianceCompressor:
         
         return macro_token
 
-def load_pretrained_autoencoders(hidden_dim: int):
+def load_pretrained_autoencoders(hidden_dim: int, tau_wiggle: float = 0.05):
     """
-    Returns the deterministic Variance compressor.
+    Returns the stochastic Variance compressor.
     No weights are loaded from disk.
     """
-    print(f"[TSP] \U0001F5DC Using Deterministic Variance Compression (No training required).")
-    k_encoder = VarianceCompressor(hidden_dim=hidden_dim)
-    v_encoder = VarianceCompressor(hidden_dim=hidden_dim)
+    print(f"[TSP] \U0001F5DC Using Stochastic Variance Compression (Tau Wiggle={tau_wiggle}).")
+    k_encoder = VarianceCompressor(hidden_dim=hidden_dim, tau_wiggle=tau_wiggle)
+    v_encoder = VarianceCompressor(hidden_dim=hidden_dim, tau_wiggle=tau_wiggle)
     
     return k_encoder, v_encoder
