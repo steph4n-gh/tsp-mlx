@@ -46,7 +46,7 @@ def print_dashboard(total_gen, active_ids, evicted, lambda2, turn, total_turns, 
 async def main():
     print("Loading model (Qwen2.5-Coder-7B-Instruct)...")
     try:
-        model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+        model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-8bit")
     except Exception as e:
         print(f"Failed to load model. Error: {e}")
         return

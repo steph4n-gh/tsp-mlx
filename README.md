@@ -31,7 +31,7 @@ from mlx_lm import load
 from tsp_mlx.generate import generate_with_tsp
 
 async def main():
-    model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+    model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-8bit")
     
     # 🛑 Untrusted tokens bypass permanent learning to prevent poisoning
     untrusted = {5, 6, 7} 

@@ -18,9 +18,16 @@ def setup_tsp(model, head_dim: int = 128, enable_compression: bool = True, enabl
         manager.consolidator.salience_threshold = 0.0
         manager.consolidator.load_adapters()
         
+    # Check if already patched to prevent recursive wrapper explosion
+    if not getattr(model, '_tsp_is_patched', False):
+        patch_attention_for_extraction(model)
+        patch_rope_for_sparse_positions(model, manager.position_tracker)
+        model._tsp_is_patched = True
+    else:
+        # Just update the position tracker reference on the already patched rope
+        patch_rope_for_sparse_positions(model, manager.position_tracker)
+        
     model._tsp_kv_manager = manager
-    patch_attention_for_extraction(model)
-    patch_rope_for_sparse_positions(model, manager.position_tracker)
     return manager
 
 async def generate_with_tsp(model, tokenizer, prompt: str, max_tokens: int = 100, head_dim: int = 128, untrusted_indices: set = None, temp: float = 0.0, **kwargs):

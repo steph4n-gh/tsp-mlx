@@ -50,17 +50,22 @@ def patch_attention_for_extraction(model: nn.Module):
                         pass
 
         def __call__(self, x, mask=None, cache=None, **kwargs):
-            # 🛑 FIX: Extract L from x directly. 
+            # 🛑 FIX: Extract L from x directly.
             # Do absolutely zero math until we verify it is the decode phase.
             B, L, _ = x.shape
-            
+
+            if x is not None and cache is not None:
+                if not hasattr(cache, 'x_states') or cache.x_states is None:
+                    cache.x_states = x
+                else:
+                    cache.x_states = mx.concatenate([cache.x_states, x], axis=1)
+
             if L == 1 and hasattr(self.orig, "q_proj") and hasattr(self.orig, "k_proj") and hasattr(self.orig, "v_proj"):
                 if hasattr(model, '_tsp_kv_manager') and model._tsp_kv_manager is not None:
                     # ONLY run the manual projections if we are extracting the matrix
                     queries = self.orig.q_proj(x)
                     keys = self.orig.k_proj(x)
-                    values = self.orig.v_proj(x)
-                    
+                    values = self.orig.v_proj(x)                    
                     n_heads = getattr(self.orig, "n_heads", 1)
                     n_kv_heads = getattr(self.orig, "n_kv_heads", n_heads)
                     
@@ -94,6 +99,17 @@ def patch_attention_for_extraction(model: nn.Module):
                     scale = 1.0 / mx.sqrt(queries.shape[-1])
                     scores = (queries * scale) @ full_keys.transpose(0, 1, 3, 2)
                     attn_weights = mx.softmax(scores.astype(mx.float32), axis=-1).astype(scores.dtype)
+                    
+                    if not hasattr(model._tsp_kv_manager, 'layer_scores_accum') or model._tsp_kv_manager.layer_scores_accum is None:
+                        model._tsp_kv_manager.layer_scores_accum = scores
+                    else:
+                        if model._tsp_kv_manager.layer_scores_accum.shape != scores.shape:
+                            model._tsp_kv_manager.layer_scores_accum = scores
+                        else:
+                            model._tsp_kv_manager.layer_scores_accum = mx.maximum(model._tsp_kv_manager.layer_scores_accum, scores)
+                            
+                    model._tsp_kv_manager.last_scores_matrix = model._tsp_kv_manager.layer_scores_accum
+                    
                     del scores # 🛑 FIX: Explicitly drop scores to prevent OOM
                     
                     if not hasattr(model._tsp_kv_manager, 'layer_attn_accum') or model._tsp_kv_manager.layer_attn_accum is None:
@@ -105,9 +121,6 @@ def patch_attention_for_extraction(model: nn.Module):
                             model._tsp_kv_manager.layer_attn_accum = mx.maximum(model._tsp_kv_manager.layer_attn_accum, attn_weights)
                         
                     model._tsp_kv_manager.last_attention_matrix = model._tsp_kv_manager.layer_attn_accum 
-                    
-                    if x is not None:
-                        model._tsp_kv_manager.last_hidden_states = x
             
             return self.orig(x, mask=mask, cache=cache, **kwargs)
 
@@ -187,11 +200,32 @@ async def generate_infinite_context(
             kv_manager.layer_scores_accum = None
         # -----------------------------------------
 
+        # We don't compile decode_step here because it drops the AttentionWrapper side effects
+        def decode_step(y_step):
+            kv_manager.layer_attn_accum = None
+            kv_manager.layer_scores_accum = None
+            if hasattr(model, "model") and hasattr(model, "lm_head"):
+                hidden_states = model.model(y_step, cache=kv_caches)
+                logits = model.lm_head(hidden_states)
+            else:
+                logits = model(y_step, cache=kv_caches)
+            return logits, kv_manager.layer_attn_accum
+
         for i in range(max_tokens):
             kv_manager.position_tracker.step(y.shape[1])
             
-            logits = model(y, cache=kv_caches)
-            logits = logits[:, -1, :]
+            if y.shape[1] == 1:
+                logits, attn_matrix = decode_step(y)
+                logits = logits[:, -1, :]
+                kv_manager.last_attention_matrix = attn_matrix
+            else:
+                if hasattr(model, "model") and hasattr(model, "lm_head"):
+                    hidden_states = model.model(y, cache=kv_caches)
+                    logits = model.lm_head(hidden_states[:, -1:, :])
+                    logits = logits[:, -1, :]
+                else:
+                    logits = model(y, cache=kv_caches)
+                    logits = logits[:, -1, :]
             
             # --- Apply Repetition Penalty ---
             if repetition_penalty > 1.0 and len(history_tokens) > 0:
@@ -212,17 +246,25 @@ async def generate_infinite_context(
             else:
                 y = mx.argmax(logits, axis=-1, keepdims=True)
                 
-            history_tokens.append(y.item())
+            # 🛑 EXTRACT CACHES
+            cache_tensors = [c.keys for c in kv_caches if c.keys is not None] + \
+                            [c.values for c in kv_caches if c.values is not None]
             
             if hasattr(kv_manager, 'last_attention_matrix') and kv_manager.last_attention_matrix is not None:
                 attn_matrix = kv_manager.last_attention_matrix
-                hidden_states = getattr(kv_manager, 'last_hidden_states', None)
                 
-                raw_caches = [(c.keys, c.values) for c in kv_caches]
+                # 🛑 CRITICAL FIX: Evaluate EVERYTHING in ONE PASS before hitting Python boundaries
+                eval_targets = [y, attn_matrix, kv_manager.position_tracker.get_positions()] + cache_tensors
+                mx.eval(*eval_targets)
+                
+                # NOW safe to cross Python boundary
+                history_tokens.append(y.item())
+                
+                raw_caches = [(c.keys, c.values, getattr(c, 'x_states', None)) for c in kv_caches]
                 before_len = kv_manager.position_tracker.get_positions().shape[0]
                 
-                # Use sinks = [0,1,2,3,4] to protect system prompt
-                pruned_raw_caches = kv_manager.update(attn_matrix, raw_caches, sinks=[0, 1, 2, 3, 4], x=hidden_states)
+                # (This runs instantly now because attn_matrix is fully realized in Metal)
+                pruned_raw_caches = kv_manager.update(attn_matrix, raw_caches, sinks=[0, 1, 2, 3, 4])
                 
                 after_len = kv_manager.position_tracker.get_positions().shape[0]
                 total_evicted += (before_len - after_len)
@@ -231,29 +273,25 @@ async def generate_infinite_context(
                     lambda_2 = kv_manager.cortex_hook.last_lambda_2
                 
                 if pruned_raw_caches is not raw_caches:
-                    for cache_obj, (pk, pv) in zip(kv_caches, pruned_raw_caches):
+                    for cache_obj, (pk, pv, px) in zip(kv_caches, pruned_raw_caches):
                         cache_obj.keys = pk
                         cache_obj.values = pv
                         cache_obj.offset = pk.shape[2] 
+                        if px is not None:
+                            cache_obj.x_states = px
                 
                 kv_manager.last_attention_matrix = None
-                kv_manager.last_hidden_states = None
+                kv_manager.last_scores_matrix = None
                 
-                cache_tensors = []
-                for c in kv_caches:
-                    if c.keys is not None: cache_tensors.append(c.keys)
-                    if c.values is not None: cache_tensors.append(c.values)
+                # Evaluate pruned cache so it's fully realized for the next loop
+                new_cache_tensors = [c.keys for c in kv_caches if c.keys is not None] + \
+                                    [c.values for c in kv_caches if c.values is not None] + \
+                                    [c.x_states for c in kv_caches if hasattr(c, 'x_states') and c.x_states is not None]
+                mx.eval(kv_manager.position_tracker.get_positions(), *new_cache_tensors)
                 
-                # 🛑 CRITICAL: Clear the computation graph to prevent memory leaks
-                mx.synchronize()
-                mx.eval(y, kv_manager.position_tracker.get_positions(), *cache_tensors)
             else:
-                cache_tensors = []
-                for c in kv_caches:
-                    if c.keys is not None: cache_tensors.append(c.keys)
-                    if c.values is not None: cache_tensors.append(c.values)
-                mx.synchronize()
-                mx.eval(y, *cache_tensors)
+                mx.eval(y, kv_manager.position_tracker.get_positions(), *cache_tensors)
+                history_tokens.append(y.item())
             
             stats = {
                 "active_positions": kv_manager.position_tracker.position_ids.copy(),

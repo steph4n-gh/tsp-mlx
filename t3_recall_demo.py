@@ -67,7 +67,7 @@ def print_dashboard(total_gen, active_ids, evicted, lambda2, step_name, topologi
 async def main():
     print("Loading Immutable Agent (Qwen2.5-Coder-7B-Instruct-4bit)...")
     try:
-        model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+        model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-8bit")
     except Exception as e:
         print(f"Failed to load model. Error: {e}")
         return
@@ -183,7 +183,10 @@ async def main():
             manager.position_tracker.step(seq_len)
             
             # 🛑 NATIVE SINGLE-SHOT FORWARD PASS
-            _ = model(prefill_ids, cache=persistent_cache)
+            if hasattr(model, "model"):
+                _ = model.model(prefill_ids, cache=persistent_cache)
+            else:
+                _ = model(prefill_ids, cache=persistent_cache)
             
             # Extract strictly what needs to be evaluated
             cache_tensors = []

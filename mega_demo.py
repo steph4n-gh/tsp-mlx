@@ -48,7 +48,7 @@ def print_dashboard(total_gen, active_ids, evicted, lambda2, step_name, topologi
 async def main():
     print("Loading Immutable Agent (Qwen2.5-Coder-7B-Instruct-4bit)...")
     try:
-        model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+        model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-8bit")
     except Exception as e:
         print(f"Failed to load model. Error: {e}")
         return

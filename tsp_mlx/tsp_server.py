@@ -120,14 +120,7 @@ async def chat_completions(req: ChatRequest):
     
     from tsp_mlx.generate import generate_with_tsp
     
-    # We still need head_dim for setup
-    from mlx_lm.models.cache import make_prompt_cache
-    dummy_cache = make_prompt_cache(model)
-    head_dim = dummy_cache[0].keys.shape[-1]
-    for c in dummy_cache: c.keys = None; c.values = None
-    del dummy_cache
-
-    generator = generate_with_tsp(model, tokenizer, prompt, max_tokens=req.max_tokens, head_dim=head_dim, untrusted_indices=untrusted_indices)
+    generator = generate_with_tsp(model, tokenizer, prompt, max_tokens=req.max_tokens, head_dim=128, untrusted_indices=untrusted_indices)
 
     async def stream_tokens():
         nonlocal generator
@@ -170,7 +163,7 @@ def run_server():
     global model, tokenizer
     import uvicorn
     
-    model_name = "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"
+    model_name = "mlx-community/Qwen2.5-Coder-7B-Instruct-8bit"
     logger.info(f"Booting TSP API Harness ({model_name})...")
     try:
         from tsp_mlx.inference import patch_attention_for_extraction, patch_rope_for_sparse_positions

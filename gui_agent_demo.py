@@ -40,7 +40,7 @@ def print_ui(total_gen, active_ids, evicted, action_log=""):
 async def main():
     print("Initializing GUI Orchestrator Agent with Qwen2.5-Coder-7B-Instruct...")
     try:
-        model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+        model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-8bit")
     except Exception as e:
         print(f"Failed to load model. Error: {e}")
         return

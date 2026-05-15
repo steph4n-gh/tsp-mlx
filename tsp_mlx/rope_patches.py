@@ -25,18 +25,23 @@ def patch_rope_for_sparse_positions(model: nn.Module, tracker: SparsePositionTra
             rope_layer = attention.rope
             rope_cls = rope_layer.__class__
             
+            if "PatchedRoPE" in rope_cls.__name__:
+                continue # Already patched, prevent infinite recursion
+            
             class PatchedRoPE(rope_cls):
                 # Save a reference to the original, un-patched call method
                 orig_call = rope_cls.__call__
 
                 def __call__(self, x, offset=0, **kwargs):
-                    seq_len = x.shape[2]
+                    seq_len = x.shape[2] # 🛑 FIX: The sequence length is at index 2
                     
-                    # 🛑 THE SPEED FIX: Complete Bypass for Prefill.
-                    # No .item() syncs. No graph fracturing. 
-                    # We natively accept the offset mlx_lm provides.
                     if seq_len > 1:
-                        return PatchedRoPE.orig_call(self, x, offset=offset, **kwargs)
+                        # 🛑 THE PREFILL FIX: If cache is pruned, native cache.offset is wrong.
+                        if hasattr(model, "_tsp_kv_manager") and model._tsp_kv_manager is not None:
+                            true_offset = model._tsp_kv_manager.position_tracker.current_pos - seq_len
+                        else:
+                            true_offset = offset
+                        return PatchedRoPE.orig_call(self, x, offset=true_offset, **kwargs)
 
                     # --- DECODE PHASE (L == 1) MANUAL SPARSE MATH ---
                     if hasattr(model, "_tsp_kv_manager") and model._tsp_kv_manager is not None:
@@ -50,8 +55,8 @@ def patch_rope_for_sparse_positions(model: nn.Module, tracker: SparsePositionTra
                         positions = mx.arange(offset, offset + seq_len, dtype=x.dtype)
                     else:
                         true_positions = all_positions[-seq_len:]
-                        # mx.array cast does NOT trigger a CPU sync, preserving graph integrity.
-                        positions = mx.array(true_positions, dtype=x.dtype)
+                        # Avoid allocating a new array buffer. `true_positions` is already an mx.array.
+                        positions = true_positions.astype(x.dtype)
                     
                     scale = getattr(self, "scale", 1.0)
                     scaled_positions = positions.astype(mx.float32) * scale

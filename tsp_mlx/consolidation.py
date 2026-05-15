@@ -3,7 +3,7 @@ import mlx.nn as nn
 import mlx.optimizers as optim
 
 class LoRALinear(nn.Module):
-    def __init__(self, linear: nn.Module, r: int = 16, alpha: int = 32):
+    def __init__(self, linear: nn.Module, r: int = 64, alpha: int = 32):
         super().__init__()
         self.linear = linear
         self.r = r
@@ -20,10 +20,11 @@ class LoRALinear(nn.Module):
             out_features, in_features = linear.weight.shape
             self.target_dtype = getattr(linear.weight, "dtype", mx.float16)
         
-        # 🛑 THE SPEED FIX: Strictly enforce FP16 initialization.
-        # This prevents the silent promotion to FP32 that breaks FlashAttention.
-        self.lora_a = (mx.random.normal((in_features, r), dtype=self.target_dtype) * 1e-3)
-        self.lora_b = mx.zeros((r, out_features), dtype=self.target_dtype)
+        # 🛑 THE OPTIMIZER FIX: Strictly enforce FP32 initialization for LoRA weights.
+        # If initialized in FP16, AdamW's g**2 variance tracking will overflow to infinity,
+        # resulting in NaN parameters after the first optimization step.
+        self.lora_a = mx.random.normal((in_features, r), dtype=mx.float32) * 1e-3
+        self.lora_b = mx.zeros((r, out_features), dtype=mx.float32)
         
         # 🛑 THE FATAL COMPILER FIX:
         # Force the GPU to materialize the random tensors immediately. 
@@ -31,13 +32,16 @@ class LoRALinear(nn.Module):
         mx.eval(self.lora_a, self.lora_b)
         
         # 🛑 SPEED FIX: Bypass flag.
-        self.is_active = False 
+        self.is_active = True
 
     def __call__(self, x):
-        # 🛑 HARD BYPASS: Completely disable LoRA math for debugging.
-        # If the engine flies with this on, we know FlashAttention was fracturing.
-        return self.linear(x)
-
+        if not self.is_active:
+            return self.linear(x)
+            
+        # The LoRA math (x_32 @ FP32 @ FP32 prevents overflow in both directions)
+        x_32 = x.astype(mx.float32)
+        lora_res = (x_32 @ self.lora_a @ self.lora_b) * self.scale
+        return self.linear(x) + lora_res.astype(self.target_dtype)
 class MemoryConsolidator:
     def __init__(self, model: nn.Module = None, learning_rate: float = None, salience_threshold: float = 0.5):
         self.salience_threshold = salience_threshold
@@ -89,29 +93,30 @@ class MemoryConsolidator:
             self.learning_rate = user_lr
 
     def _inject_lora(self):
-        """Inject LoRA adapters into the value projections of all transformer layers."""
+        """Inject LoRA adapters into the value projection of ONLY the final transformer layer."""
         from .inference import find_layers
         layers = find_layers(self.model)
-        if layers is None:
+        if not layers:
             return
-            
+
         self.model.freeze()
-            
-        for layer in layers:
-            # Most MLX models use 'v_proj'
-            if hasattr(layer.self_attn, "v_proj"):
-                orig_v_proj = layer.self_attn.v_proj
-                if not isinstance(orig_v_proj, LoRALinear):
-                    lora_v = LoRALinear(orig_v_proj)
-                    layer.self_attn.v_proj = lora_v
-                    self.lora_layers.append(lora_v)
-                else:
-                    self.lora_layers.append(orig_v_proj)
-                    
+
+        # ONLY inject into the final layer to massively reduce TTT latency and memory overhead
+        last_layer = layers[-1]
+
+        # Most MLX models use 'v_proj'
+        if hasattr(last_layer.self_attn, "v_proj"):
+            orig_v_proj = last_layer.self_attn.v_proj
+            if not isinstance(orig_v_proj, LoRALinear):
+                lora_v = LoRALinear(orig_v_proj)
+                last_layer.self_attn.v_proj = lora_v
+                self.lora_layers.append(lora_v)
+            else:
+                self.lora_layers.append(orig_v_proj)
+
         for lora in self.lora_layers:
             lora.unfreeze()
             lora.linear.freeze()
-
     def evaluate_salience(self, attention_matrix: mx.array, island_physical_indices: list) -> float:
         if len(island_physical_indices) < 2:
             return 0.0
@@ -157,31 +162,38 @@ class MemoryConsolidator:
             # Materialize them immediately to prevent holding onto the entire hidden state graph
             mx.eval(x_island, v_target)
             
+            if mx.any(mx.isnan(x_island)).item():
+                print("[TSP] WARNING: x_island contains NaNs!")
+            if mx.any(mx.isnan(v_target)).item():
+                print("[TSP] WARNING: v_target contains NaNs!")
+            
             # 🚀 OPTIMIZATION: Pre-calculate the output of the frozen linear layers once.
             # This avoids re-running 28+ large linear layers 3-5 times in the loop.
             frozen_outputs = []
             for lora in self.lora_layers:
-                frozen_outputs.append(mx.stop_gradient(lora.linear(x_island)))
-            mx.eval(frozen_outputs)
+                frozen = mx.stop_gradient(lora.linear(x_island))
+                mx.eval(frozen)
+                if mx.any(mx.isnan(frozen)).item():
+                    print("[TSP] WARNING: frozen_outputs contains NaNs!")
+                frozen_outputs.append(frozen)
 
             def loss_fn(model_params):
                 total_loss = 0
                 for i, lora in enumerate(self.lora_layers):
                     # Optimized: Only compute the LoRA path during the optimization loop
-                    lora_res = (x_island @ lora.lora_a @ lora.lora_b) * lora.scale
-                    v_pred = frozen_outputs[i] + lora_res
-                    total_loss += mx.mean(mx.square(v_pred - v_target))
+                    # Cast x_island to float32 to match FP32 lora weights
+                    x_island_32 = x_island.astype(mx.float32)
+                    
+                    lora_res = (x_island_32 @ lora.lora_a @ lora.lora_b) * lora.scale
+                    v_pred = frozen_outputs[i].astype(mx.float32) + lora_res
+                    total_loss += mx.mean(mx.square(v_pred - v_target.astype(mx.float32)))
                 return total_loss / len(self.lora_layers)
 
             loss_and_grad_fn = nn.value_and_grad(self.model, loss_fn)
             
-            # Perform 3-5 steps of optimization
-            for step in range(3):
+            # Perform 10 steps of optimization for deeper memorization
+            for step in range(10):
                 loss, grads = loss_and_grad_fn(self.model)
-                
-                # 🛑 CRITICAL FIX: Clip gradients to prevent NaN explosion when training on 4-bit models
-                if self.max_grad_norm is not None:
-                    grads, _ = optim.clip_grad_norm(grads, max_norm=self.max_grad_norm)
                 
                 self.optimizer.update(self.model, grads)
                 mx.eval(self.model.trainable_parameters(), self.optimizer.state)
@@ -194,8 +206,6 @@ class MemoryConsolidator:
             # Activate the LoRA path now that weights have been updated
             for lora in self.lora_layers:
                 lora.is_active = True
-                
-            self.save_adapters()
             
             # Final cleanup of the TTT graph
             mx.clear_cache()

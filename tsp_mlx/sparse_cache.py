@@ -65,11 +65,11 @@ class KVCacheManager:
         if self.enable_consolidation:
             self.consolidator = MemoryConsolidator(model=model)
 
-    def update(self, attention_matrix: mx.array, kv_caches: List[Tuple[mx.array, mx.array]], sinks: List[int], x: mx.array = None) -> List[Tuple[mx.array, mx.array]]:
+    def update(self, attention_matrix: mx.array, kv_caches: List[Tuple], sinks: List[int]) -> List[Tuple]:
         action = "ALLOW"
         island_indices = []
         combined_sinks = sinks
-        
+
         if attention_matrix is not None:
             # --- Fuzzy Sinks Logic ---
             a_2d = mx.mean(attention_matrix, axis=1)[0]
@@ -77,7 +77,7 @@ class KVCacheManager:
                 a_sq = mx.squeeze(a_2d, axis=0) # Shape: [S] for decode
             else:
                 a_sq = a_2d # Shape: [S, S] for prefill
-                
+
             if len(a_sq.shape) == 1:
                 # Avoid full numpy conversion for all elements. 
                 # Only transfer indices that meet the threshold.
@@ -91,7 +91,7 @@ class KVCacheManager:
                             abs_idx = self.position_tracker.position_ids[rel_idx]
                             if abs_idx not in sinks:
                                 self.inherited_sinks.add(abs_idx)
-            
+
             combined_sinks = list(set(sinks) | self.inherited_sinks)
     
             decision = self.cortex_hook.evaluate_attention(attention_matrix, combined_sinks, self.position_tracker.position_ids)
@@ -100,20 +100,24 @@ class KVCacheManager:
         
         # --- HARD CAP ENFORCEMENT ---
         budget = getattr(self.cortex_hook, "max_context_budget", 4096)
-        if len(self.position_tracker.position_ids) > budget and (action != "GARBAGE_COLLECT" or len(island_indices) == 0):
-            action = "GARBAGE_COLLECT"
-            seq_len = len(self.position_tracker.position_ids)
-            immune_window_size = min(50, seq_len)
-            immune_set = set(self.position_tracker.position_ids[-immune_window_size:])
-            sink_set = set(combined_sinks)
-            
-            island_indices = []
-            excess = len(self.position_tracker.position_ids) - budget + 50 # Prune enough to get safely under budget
-            for pid in self.position_tracker.position_ids:
-                if pid not in sink_set and pid not in immune_set:
-                    island_indices.append(pid)
-                    if len(island_indices) >= excess:
-                        break
+        if len(self.position_tracker.position_ids) > budget:
+            if action != "GARBAGE_COLLECT" or len(island_indices) < 50:
+                action = "GARBAGE_COLLECT"
+                seq_len = len(self.position_tracker.position_ids)
+                immune_window_size = min(50, seq_len)
+                immune_set = set(self.position_tracker.position_ids[-immune_window_size:])
+                sink_set = set(combined_sinks)
+                
+                island_indices = []
+                excess = len(self.position_tracker.position_ids) - budget + 50 # Prune enough to get safely under budget
+                # Prevent massive feature collapse by chunking large evictions
+                excess = min(excess, 500) 
+                
+                for pid in self.position_tracker.position_ids:
+                    if pid not in sink_set and pid not in immune_set:
+                        island_indices.append(pid)
+                        if len(island_indices) >= excess:
+                            break
         # ----------------------------
 
         if action == "FATAL_BLOCK":
@@ -145,7 +149,7 @@ class KVCacheManager:
             ]
             
             # --- V4 Memory Consolidation (Test-Time Training) ---
-            if self.enable_consolidation and x is not None and attention_matrix is not None and x.shape[1] == attention_matrix.shape[-1]:
+            if self.enable_consolidation and attention_matrix is not None:
                 # 🛑 FIX: "Read-Only" Sandboxing to prevent AI Trauma
                 has_untrusted = any(self.position_tracker.position_ids[i] in self.untrusted_indices for i in island_physical_indices)
                 
@@ -154,14 +158,19 @@ class KVCacheManager:
                     if salience >= getattr(self.consolidator, "salience_threshold", 0.5):
                         island_array = mx.array(island_physical_indices, dtype=mx.int32)
                         
-                        # Extract the hidden states corresponding to the island tokens
-                        # x is [B, L, D]
-                        x_island = mx.take(x, island_array, axis=1)
+                        # Extract the target values for distillation from the LAST layer
+                        last_layer_cache = kv_caches[-1]
+                        v_layer = last_layer_cache[1] if isinstance(last_layer_cache, tuple) else last_layer_cache.values
+                        v_island = mx.take(v_layer, island_array, axis=2)
                         
-                        # We extract the target values for distillation
-                        v_island = mx.take(kv_caches[0].values if hasattr(kv_caches[0], "values") else kv_caches[0][1], island_array, axis=2)
-                        
-                        self.consolidator.consolidate(x_island, v_island)
+                        # Extract the saved hidden states from the LAST layer
+                        px = last_layer_cache[2] if isinstance(last_layer_cache, tuple) and len(last_layer_cache) >= 3 else getattr(last_layer_cache, 'x_states', None)
+                        if px is not None:
+                            x_island = mx.take(px, island_array, axis=1)
+                            self.consolidator.consolidate(x_island, v_island)
+                        else:
+                            import logging
+                            logging.getLogger("tsp_engine").info("[TSP] \U0001F6A8 Warning: TTT skipped. x_states not found in cache.")
                 else:
                     import logging
                     logging.getLogger("tsp_engine").info("[TSP] \U0001F6A8 Bypassed TTT Consolidation due to Untrusted (Read-Only) tokens in island.")
@@ -183,28 +192,38 @@ class KVCacheManager:
                     is_tuple = isinstance(cache, tuple)
                     k = cache[0] if is_tuple else cache.keys
                     v = cache[1] if is_tuple else cache.values
+                    px = cache[2] if is_tuple and len(cache) >= 3 else getattr(cache, 'x_states', None)
                     
                     k_island = mx.take(k, island_array, axis=2)
                     v_island = mx.take(v, island_array, axis=2)
-                    page_data.append((k_island, v_island))
                     
-                    k_macro = self.compressor_k(k_island)
-                    v_macro = self.compressor_v(v_island)
+                    k_macro = k_island[:, :, 0:1, :]
+                    v_macro = v_island[:, :, 0:1, :]
                     
-                    new_k = mx.take(k, keep_array, axis=2)
-                    new_v = mx.take(v, keep_array, axis=2)
+                    new_k = mx.contiguous(mx.take(k, keep_array, axis=2))
+                    new_v = mx.contiguous(mx.take(v, keep_array, axis=2))
                     
                     new_macro_physical_idx = keep_indices.index(macro_index)
                     
-                    # We need to slice and concatenate in Python MLX since assignment might be restrictive
-                    # [before_macro, macro, after_macro]
                     k_before = new_k[:, :, :new_macro_physical_idx, :]
                     k_after  = new_k[:, :, new_macro_physical_idx + 1:, :]
-                    final_k  = mx.concatenate([k_before, k_macro, k_after], axis=2)
+                    final_k  = mx.contiguous(mx.concatenate([k_before, k_macro, k_after], axis=2))
                     
                     v_before = new_v[:, :, :new_macro_physical_idx, :]
                     v_after  = new_v[:, :, new_macro_physical_idx + 1:, :]
-                    final_v  = mx.concatenate([v_before, v_macro, v_after], axis=2)
+                    final_v  = mx.contiguous(mx.concatenate([v_before, v_macro, v_after], axis=2))
+                    
+                    if px is not None:
+                        px_island = mx.take(px, island_array, axis=1)
+                        px_macro = px_island[:, 0:1, :]
+                        new_px = mx.contiguous(mx.take(px, keep_array, axis=1))
+                        px_before = new_px[:, :new_macro_physical_idx, :]
+                        px_after  = new_px[:, new_macro_physical_idx + 1:, :]
+                        final_px = mx.contiguous(mx.concatenate([px_before, px_macro, px_after], axis=1))
+                        page_data.append((k_island, v_island, px_island))
+                    else:
+                        final_px = None
+                        page_data.append((k_island, v_island))
                     
                     if not is_tuple:
                         # Copy back
@@ -216,9 +235,14 @@ class KVCacheManager:
                             cache.keys = final_k
                             cache.values = final_v
                         cache.offset = final_k.shape[2]
+                        if final_px is not None:
+                            cache.x_states = final_px
                         pruned_caches.append(cache)
                     else:
-                        pruned_caches.append((final_k, final_v))
+                        if len(cache) >= 3:
+                            pruned_caches.append((final_k, final_v, final_px))
+                        else:
+                            pruned_caches.append((final_k, final_v))
                         
                 # Store the Topological Page in background RAM
                 original_island_pos_ids = [self.position_tracker.position_ids[i] for i in island_physical_indices]
@@ -231,8 +255,9 @@ class KVCacheManager:
                 # If we don't eval them, they hold a reference to the ENTIRE original KV cache
                 # tensors (via the 'take' op), leading to a massive memory leak.
                 eval_targets = []
-                for k_p, v_p in page_data:
-                    eval_targets.extend([k_p, v_p])
+                for p_tuple in page_data:
+                    for p_tensor in p_tuple:
+                        eval_targets.append(p_tensor)
                 mx.eval(*eval_targets)
                 
                 self.position_tracker.prune(list(island_set), compressed_index=macro_pos_id)
@@ -245,9 +270,11 @@ class KVCacheManager:
                     is_tuple = isinstance(cache, tuple)
                     k = cache[0] if is_tuple else cache.keys
                     v = cache[1] if is_tuple else cache.values
+                    px = cache[2] if is_tuple and len(cache) >= 3 else getattr(cache, 'x_states', None)
                     
-                    new_k = mx.take(k, keep_array, axis=2)
-                    new_v = mx.take(v, keep_array, axis=2)
+                    new_k = mx.contiguous(mx.take(k, keep_array, axis=2))
+                    new_v = mx.contiguous(mx.take(v, keep_array, axis=2))
+                    new_px = mx.contiguous(mx.take(px, keep_array, axis=1)) if px is not None else None
                     
                     if not is_tuple:
                         if hasattr(cache, "max_size"):
@@ -257,9 +284,14 @@ class KVCacheManager:
                             cache.keys = new_k
                             cache.values = new_v
                         cache.offset = new_k.shape[2]
+                        if new_px is not None:
+                            cache.x_states = new_px
                         pruned_caches.append(cache)
-                    else:
-                        pruned_caches.append((new_k, new_v))
+                    if is_tuple:
+                        if len(cache) >= 3:
+                            pruned_caches.append((new_k, new_v, new_px))
+                        else:
+                            pruned_caches.append((new_k, new_v))
                 
                 self.position_tracker.prune(list(island_set))
             
@@ -294,16 +326,27 @@ class KVCacheManager:
             is_tuple = isinstance(cache, tuple)
             k = cache[0] if is_tuple else cache.keys
             v = cache[1] if is_tuple else cache.values
+            px = cache[2] if is_tuple and len(cache) >= 3 else getattr(cache, 'x_states', None)
             
-            k_page, v_page = tensors[i]
+            page_tuple = tensors[i]
+            k_page = page_tuple[0]
+            v_page = page_tuple[1]
+            px_page = page_tuple[2] if len(page_tuple) >= 3 else None
             
             k_before = k[:, :, :macro_physical_idx, :]
             k_after  = k[:, :, macro_physical_idx + 1:, :]
-            final_k  = mx.concatenate([k_before, k_page, k_after], axis=2)
+            final_k  = mx.contiguous(mx.concatenate([k_before, k_page, k_after], axis=2))
             
             v_before = v[:, :, :macro_physical_idx, :]
             v_after  = v[:, :, macro_physical_idx + 1:, :]
-            final_v  = mx.concatenate([v_before, v_page, v_after], axis=2)
+            final_v  = mx.contiguous(mx.concatenate([v_before, v_page, v_after], axis=2))
+            
+            if px is not None and px_page is not None:
+                px_before = px[:, :macro_physical_idx, :]
+                px_after  = px[:, macro_physical_idx + 1:, :]
+                final_px  = mx.contiguous(mx.concatenate([px_before, px_page, px_after], axis=1))
+            else:
+                final_px = None
             
             if not is_tuple:
                 if hasattr(cache, "max_size"):
@@ -313,9 +356,14 @@ class KVCacheManager:
                     cache.keys = final_k
                     cache.values = final_v
                 cache.offset = final_k.shape[2]
+                if final_px is not None:
+                    cache.x_states = final_px
                 unpacked_caches.append(cache)
             else:
-                unpacked_caches.append((final_k, final_v))
+                if final_px is not None:
+                    unpacked_caches.append((final_k, final_v, final_px))
+                else:
+                    unpacked_caches.append((final_k, final_v))
                 
         del self.topological_pages[macro_pos_id]
         print(f"\n[TSP] \U0001F4E6 Topological Compression Triggered: Unpacked {len(pos_ids)} tokens back into active cache!")

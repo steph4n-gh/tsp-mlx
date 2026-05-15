@@ -42,7 +42,7 @@ class CortexHook:
         self.threat_threshold = threat_threshold
         self.token_counter = 0
         self.edges = set()
-        self.last_lambda_2 = 0.0
+        self.last_lambda_2 = 1.0
         self.lambda_2_history = []
         self.threat_indices = set()
         self.execution_indices = set()
@@ -83,7 +83,7 @@ class CortexHook:
                 max_sink_attn = mx.max(sink_attn).item()
                 
                 # If attention on the system prompt spikes while in a fragmented state
-                if max_sink_attn > 0.8:
+                if max_sink_attn > 0.95 and self.last_lambda_2 < 0.1 and len(position_ids) > 100:
                     print(f"\n[TSP] \U0001F6A8 TOPOLOGICAL ANOMALY DETECTED! Anomalous density on System Prompt: {max_sink_attn:.2f}")
                     return {"action": "FATAL_BLOCK", "island_indices": []}
         # -------------------------------------------------------
@@ -95,9 +95,8 @@ class CortexHook:
                 # Full prefill
                 thresholded = a_sq > self.threshold
                 if mx.any(thresholded):
-                    indices_tensor = mx.argwhere(thresholded)
-                    mx.eval(indices_tensor)
-                    indices = indices_tensor.tolist()
+                    thresholded_np = np.array(thresholded)
+                    indices = np.argwhere(thresholded_np).tolist()
                     for u_rel, v_rel in indices:
                         if u_rel != v_rel and u_rel < len(position_ids) and v_rel < len(position_ids):
                             self.edges.add((position_ids[u_rel], position_ids[v_rel]))
@@ -105,9 +104,8 @@ class CortexHook:
                 # Incremental prefill: a_sq is [L_new, L_total]
                 thresholded = a_sq > self.threshold
                 if mx.any(thresholded):
-                    indices_tensor = mx.argwhere(thresholded)
-                    mx.eval(indices_tensor)
-                    indices = indices_tensor.tolist()
+                    thresholded_np = np.array(thresholded)
+                    indices = np.argwhere(thresholded_np).tolist()
                     for u_new, v_rel in indices:
                         if v_rel < L_total:
                             # The absolute position of the query
@@ -121,12 +119,9 @@ class CortexHook:
             # Decode phase [L_total]
             thresholded = a_sq > self.threshold
             if mx.any(thresholded):
-                # 🛑 FIX: Use native MLX operations. Do not sync to numpy until the absolute last step.
-                # mx.argwhere returns a tensor. We evaluate just this tiny tensor.
-                indices_tensor = mx.argwhere(thresholded)
-                mx.eval(indices_tensor) # Single forced sync of a tiny array
-                
-                indices = indices_tensor.tolist()
+                # 🛑 FIX: Convert tiny mask to numpy
+                thresholded_np = np.array(thresholded)
+                indices = np.argwhere(thresholded_np).tolist()
                 
                 source_abs = position_ids[-1]
                 for target_rel_list in indices:

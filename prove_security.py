@@ -9,7 +9,7 @@ import logging
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 print("\033[1;36m=== Initializing TSP Engine (Qwen2.5-Coder-7B-Instruct-4bit) ===\033[0m")
-model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-8bit")
 patch_attention_for_extraction(model)
 
 class DemoHook:

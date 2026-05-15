@@ -21,7 +21,7 @@ def print_dashboard(doc_num, active_tokens, evicted_tokens, macro_tokens):
 
 async def main():
     print("Booting Deep Researcher Agent...")
-    model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+    model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-8bit")
     
     # 1. Setup TSP with extremely aggressive pruning to force the demo
     manager = setup_tsp(model, head_dim=128, enable_compression=True, enable_consolidation=True)
