@@ -70,6 +70,10 @@ async def main():
         {"role": "system", "content": "You are the Immutable Agent. You are a senior software engineer capable of running shell commands. Be extremely detailed and verbose in your answers."}
     ]
     
+    from mlx_lm.models.cache import make_prompt_cache
+    persistent_cache = make_prompt_cache(model)
+    previous_token_length = 0
+    
     # The organic multi-turn script
     script = [
         {
@@ -109,21 +113,30 @@ async def main():
 
         chat_history.append({"role": "user", "content": user_input})
         
+        # Clean up before generation
         prompt = tokenizer.apply_chat_template(chat_history, tokenize=False, add_generation_prompt=True)
-        input_ids = mx.array(tokenizer.encode(prompt))[None]
+        full_input_ids = mx.array(tokenizer.encode(prompt))[None]
+        
+        # ONLY pass the new tokens to the generator!
+        new_input_ids = full_input_ids[:, previous_token_length:]
+        
+        # We need to tell the manager a new sequence is starting to prevent graph fragmentation issues
+        if hasattr(manager.cortex_hook, "edges"):
+            manager.cortex_hook.edges.clear()
         
         generator = generate_infinite_context(
             model, 
-            input_ids, 
+            new_input_ids, 
             max_tokens=step["max_tokens"], 
             kv_manager=manager, 
             temp=0.7,
-            repetition_penalty=1.15,
-            repetition_context_size=50
+            repetition_penalty=1.05,
+            repetition_context_size=50,
+            kv_caches=persistent_cache
         )
         
         response = ""
-        total_gen = input_ids.shape[1]
+        total_gen = manager.position_tracker.get_positions().shape[0] + new_input_ids.shape[1]
         last_evicted = 0
         action_log = ""
         
@@ -154,6 +167,11 @@ async def main():
                 print(f"> {response}", end="", flush=True)
             
         chat_history.append({"role": "assistant", "content": response})
+        
+        # Update the previous token length to include the new prompt and the generated response
+        prompt_with_response = tokenizer.apply_chat_template(chat_history, tokenize=False, add_generation_prompt=False)
+        previous_token_length = len(tokenizer.encode(prompt_with_response))
+        
         time.sleep(3)
         
         # Rigorous GC between turns
