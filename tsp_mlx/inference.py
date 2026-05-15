@@ -141,6 +141,26 @@ async def generate_infinite_context(
         if hasattr(kv_manager, 'last_attention_matrix'):
             attn_matrix = kv_manager.last_attention_matrix
             hidden_states = getattr(kv_manager, 'last_hidden_states', None)
+            
+            # --- Holographic Paging Unpack Trigger ---
+            if attn_matrix is not None and y.shape[1] == 1 and hasattr(kv_manager, 'holographic_pages'):
+                # attn_matrix shape during decode: [B, H, 1, Lk]
+                attn_mean = mx.mean(attn_matrix, axis=1)[0, 0]
+                unpack_targets = []
+                for macro_pos_id in list(kv_manager.holographic_pages.keys()):
+                    try:
+                        physical_idx = kv_manager.position_tracker.position_ids.index(macro_pos_id)
+                        if physical_idx < attn_mean.shape[0]:
+                            # If attention spikes on the macro token, trigger unpack
+                            if attn_mean[physical_idx].item() > 0.05:
+                                unpack_targets.append(macro_pos_id)
+                    except ValueError:
+                        pass
+                
+                for target in unpack_targets:
+                    kv_caches = kv_manager.unpack(target, kv_caches)
+            # -----------------------------------------
+            
             raw_caches = [(c.keys, c.values) for c in kv_caches]
             before_len = kv_manager.position_tracker.get_positions().shape[0]
             

@@ -56,6 +56,7 @@ class KVCacheManager:
         
         self.enable_compression = enable_compression
         self.enable_consolidation = enable_consolidation
+        self.holographic_pages = {}
         
         if self.enable_compression:
             self.compressor_k, self.compressor_v = load_pretrained_autoencoders(head_dim)
@@ -166,6 +167,7 @@ class KVCacheManager:
                 keep_array = mx.array(keep_indices, dtype=mx.int32)
                 
                 pruned_caches = []
+                page_data = []
                 for cache in kv_caches:
                     is_tuple = isinstance(cache, tuple)
                     k = cache[0] if is_tuple else cache.keys
@@ -173,6 +175,7 @@ class KVCacheManager:
                     
                     k_island = mx.take(k, island_array, axis=2)
                     v_island = mx.take(v, island_array, axis=2)
+                    page_data.append((k_island, v_island))
                     
                     k_macro = self.compressor_k(k_island)
                     v_macro = self.compressor_v(v_island)
@@ -206,6 +209,13 @@ class KVCacheManager:
                     else:
                         pruned_caches.append((final_k, final_v))
                         
+                # Store the Holographic Page in background RAM
+                original_island_pos_ids = [self.position_tracker.position_ids[i] for i in island_physical_indices]
+                self.holographic_pages[macro_pos_id] = {
+                    "pos_ids": original_island_pos_ids,
+                    "tensors": page_data
+                }
+                
                 self.position_tracker.prune(list(island_set), compressed_index=macro_pos_id)
             else:
                 # EVICTION MODE (Classic TSP)
@@ -240,3 +250,54 @@ class KVCacheManager:
             return pruned_caches
 
         return kv_caches
+
+    def unpack(self, macro_pos_id: int, kv_caches: List[Tuple[mx.array, mx.array]]):
+        if macro_pos_id not in self.holographic_pages:
+            return kv_caches
+            
+        page = self.holographic_pages[macro_pos_id]
+        pos_ids = page["pos_ids"]
+        tensors = page["tensors"]
+        
+        current_pos_ids = self.position_tracker.position_ids
+        try:
+            macro_physical_idx = current_pos_ids.index(macro_pos_id)
+        except ValueError:
+            return kv_caches
+            
+        # Rebuild position tracker
+        new_pos_ids = current_pos_ids[:macro_physical_idx] + pos_ids + current_pos_ids[macro_physical_idx+1:]
+        self.position_tracker.position_ids = new_pos_ids
+        
+        # Rebuild caches
+        unpacked_caches = []
+        for i, cache in enumerate(kv_caches):
+            is_tuple = isinstance(cache, tuple)
+            k = cache[0] if is_tuple else cache.keys
+            v = cache[1] if is_tuple else cache.values
+            
+            k_page, v_page = tensors[i]
+            
+            k_before = k[:, :, :macro_physical_idx, :]
+            k_after  = k[:, :, macro_physical_idx + 1:, :]
+            final_k  = mx.concatenate([k_before, k_page, k_after], axis=2)
+            
+            v_before = v[:, :, :macro_physical_idx, :]
+            v_after  = v[:, :, macro_physical_idx + 1:, :]
+            final_v  = mx.concatenate([v_before, v_page, v_after], axis=2)
+            
+            if not is_tuple:
+                if hasattr(cache, "max_size"):
+                    cache.keys[:, :, :final_k.shape[2], :] = final_k
+                    cache.values[:, :, :final_v.shape[2], :] = final_v
+                else:
+                    cache.keys = final_k
+                    cache.values = final_v
+                cache.offset = final_k.shape[2]
+                unpacked_caches.append(cache)
+            else:
+                unpacked_caches.append((final_k, final_v))
+                
+        del self.holographic_pages[macro_pos_id]
+        print(f"\n[TSP] \U0001F4E6 Holographic Paging Triggered: Unpacked {len(pos_ids)} tokens back into active cache!")
+        return unpacked_caches
