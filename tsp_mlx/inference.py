@@ -50,14 +50,17 @@ def patch_attention_for_extraction(model: nn.Module):
                         pass
 
         def __call__(self, x, mask=None, cache=None, **kwargs):
-            if hasattr(self.orig, "q_proj") and hasattr(self.orig, "k_proj") and hasattr(self.orig, "v_proj"):
-                queries, keys, values = self.orig.q_proj(x), self.orig.k_proj(x), self.orig.v_proj(x)
-                
-                B, L, _ = queries.shape
-                
-                # 🛑 FIX: Prevent OOM by skipping O(N^2) extraction during massive prefill.
-                # Compute the manual attention matrix if L is reasonably small to build the initial graph.
-                if L < 4096 and hasattr(model, '_tsp_kv_manager') and model._tsp_kv_manager is not None:
+            # 🛑 FIX: Extract L from x directly. 
+            # Do absolutely zero math until we verify it is the decode phase.
+            B, L, _ = x.shape
+            
+            if L == 1 and hasattr(self.orig, "q_proj") and hasattr(self.orig, "k_proj") and hasattr(self.orig, "v_proj"):
+                if hasattr(model, '_tsp_kv_manager') and model._tsp_kv_manager is not None:
+                    # ONLY run the manual projections if we are extracting the matrix
+                    queries = self.orig.q_proj(x)
+                    keys = self.orig.k_proj(x)
+                    values = self.orig.v_proj(x)
+                    
                     n_heads = getattr(self.orig, "n_heads", 1)
                     n_kv_heads = getattr(self.orig, "n_kv_heads", n_heads)
                     
@@ -72,7 +75,7 @@ def patch_attention_for_extraction(model: nn.Module):
                     
                     if cache is not None:
                         if hasattr(cache, "keys"):
-                            k_cache, v_cache = cache.keys, cache.values
+                            k_cache = cache.keys
                             if k_cache is not None:
                                 offset = getattr(cache, 'offset', k_cache.shape[2])
                                 k_cache = k_cache[:, :, :offset, :]
@@ -90,10 +93,21 @@ def patch_attention_for_extraction(model: nn.Module):
 
                     scale = 1.0 / mx.sqrt(queries.shape[-1])
                     scores = (queries * scale) @ full_keys.transpose(0, 1, 3, 2)
-                    
                     attn_weights = mx.softmax(scores.astype(mx.float32), axis=-1).astype(scores.dtype)
-                    model._tsp_kv_manager.last_attention_matrix = attn_weights 
-                    model._tsp_kv_manager.last_hidden_states = x # Capture x for TTT
+                    del scores # 🛑 FIX: Explicitly drop scores to prevent OOM
+                    
+                    if not hasattr(model._tsp_kv_manager, 'layer_attn_accum') or model._tsp_kv_manager.layer_attn_accum is None:
+                        model._tsp_kv_manager.layer_attn_accum = attn_weights
+                    else:
+                        if model._tsp_kv_manager.layer_attn_accum.shape != attn_weights.shape:
+                            model._tsp_kv_manager.layer_attn_accum = attn_weights
+                        else:
+                            model._tsp_kv_manager.layer_attn_accum = mx.maximum(model._tsp_kv_manager.layer_attn_accum, attn_weights)
+                        
+                    model._tsp_kv_manager.last_attention_matrix = model._tsp_kv_manager.layer_attn_accum 
+                    
+                    if x is not None:
+                        model._tsp_kv_manager.last_hidden_states = x
             
             return self.orig(x, mask=mask, cache=cache, **kwargs)
 
@@ -107,14 +121,18 @@ async def generate_infinite_context(
     kv_manager = None,
     temp: float = 0.0,
     repetition_penalty: float = 1.1,
-    repetition_context_size: int = 20
+    repetition_context_size: int = 20,
+    kv_caches = None
 ) -> Generator[Tuple[mx.array, dict], None, None]:
     """
     Yields (token, stats_dict) for instrumentation.
     """
     import asyncio
-    from mlx_lm.models.cache import make_prompt_cache
-    kv_caches = make_prompt_cache(model)
+    
+    if kv_caches is None:
+        from mlx_lm.models.cache import make_prompt_cache
+        kv_caches = make_prompt_cache(model)
+        
     head_dim = kv_caches[0].keys.shape[-1] if kv_caches and kv_caches[0].keys is not None else 64
 
     if kv_manager is None:
@@ -128,11 +146,6 @@ async def generate_infinite_context(
             patch_attention_for_extraction(model)
         else:
             kv_manager = model._tsp_kv_manager
-            kv_manager.position_tracker.position_ids = []
-            kv_manager.position_tracker.current_pos = 0
-            kv_manager.cortex_hook.edges = set()
-            if hasattr(kv_manager, 'topological_pages'):
-                kv_manager.topological_pages.clear()
             
     y = prompt
     total_evicted = 0
@@ -140,6 +153,40 @@ async def generate_infinite_context(
     history_tokens = []
     
     try:
+        # --- Pre-Generation Topological Compression Unpack Trigger ---
+        # We evaluate the raw attention scores from the prefill phase BEFORE it gets overwritten.
+        # Using raw scores bypasses float16 softmax underflow for massive contexts.
+        if hasattr(kv_manager, 'last_scores_matrix') and kv_manager.last_scores_matrix is not None and hasattr(kv_manager, 'topological_pages'):
+            scores_matrix = kv_manager.last_scores_matrix
+            # scores_matrix shape: [B, H, L_new, L_cache]
+            scores_mean_heads = mx.mean(scores_matrix, axis=1)[0] # shape: [L_new, L_cache]
+
+            if len(scores_mean_heads.shape) > 1:
+                scores_max_seq = mx.max(scores_mean_heads, axis=0) # shape: [L_cache]
+            else:
+                scores_max_seq = scores_mean_heads
+
+            macro_scores = []
+            for macro_pos_id in list(kv_manager.topological_pages.keys()):
+                try:
+                    physical_idx = kv_manager.position_tracker.position_ids.index(macro_pos_id)
+                    if physical_idx < scores_max_seq.shape[0]:
+                        score = scores_max_seq[physical_idx].item()
+                        macro_scores.append((score, macro_pos_id))
+                except ValueError:
+                    pass
+
+            # Unpack the top 3 most relevant Macro-Tokens
+            macro_scores.sort(reverse=True, key=lambda x: x[0])
+            unpack_targets = [m_id for score, m_id in macro_scores[:3]]
+
+            for target in unpack_targets:
+                kv_caches = kv_manager.unpack(target, kv_caches)
+
+            kv_manager.layer_attn_accum = None
+            kv_manager.layer_scores_accum = None
+        # -----------------------------------------
+
         for i in range(max_tokens):
             kv_manager.position_tracker.step(y.shape[1])
             
@@ -166,26 +213,6 @@ async def generate_infinite_context(
                 y = mx.argmax(logits, axis=-1, keepdims=True)
                 
             history_tokens.append(y.item())
-            
-            # --- Topological Compression Unpack Trigger ---
-            if hasattr(kv_manager, 'last_attention_matrix') and kv_manager.last_attention_matrix is not None and y.shape[1] == 1 and hasattr(kv_manager, 'topological_pages'):
-                attn_matrix = kv_manager.last_attention_matrix
-                # attn_matrix shape during decode: [B, H, 1, Lk]
-                attn_mean = mx.mean(attn_matrix, axis=1)[0, 0]
-                unpack_targets = []
-                for macro_pos_id in list(kv_manager.topological_pages.keys()):
-                    try:
-                        physical_idx = kv_manager.position_tracker.position_ids.index(macro_pos_id)
-                        if physical_idx < attn_mean.shape[0]:
-                            # If attention spikes on the macro token, trigger unpack
-                            if attn_mean[physical_idx].item() > 0.05:
-                                unpack_targets.append(macro_pos_id)
-                    except ValueError:
-                        pass
-                
-                for target in unpack_targets:
-                    kv_caches = kv_manager.unpack(target, kv_caches)
-            # -----------------------------------------
             
             if hasattr(kv_manager, 'last_attention_matrix') and kv_manager.last_attention_matrix is not None:
                 attn_matrix = kv_manager.last_attention_matrix

@@ -6,43 +6,44 @@ from .consolidation import MemoryConsolidator
 class SparsePositionTracker:
     def __init__(self):
         self._positions = mx.array([], dtype=mx.int32)
+        self._position_list = [] # 🛑 FIX: Fast Python lookup cache
         self.current_pos: int = 0
 
     @property
     def position_ids(self) -> List[int]:
-        # Fallback for code that still expects a list (like CortexHook)
-        return self._positions.tolist()
+        # Instant O(1) Python list return. Zero GPU syncs.
+        return self._position_list
 
     @position_ids.setter
     def position_ids(self, value: List[int]):
+        self._position_list = value
         self._positions = mx.array(value, dtype=mx.int32)
 
     def step(self, num_tokens: int = 1):
+        # Update the Python list
+        new_pos_list = list(range(self.current_pos, self.current_pos + num_tokens))
+        self._position_list.extend(new_pos_list)
+        
+        # Update the MLX array
         new_pos = mx.arange(self.current_pos, self.current_pos + num_tokens, dtype=mx.int32)
         self._positions = mx.concatenate([self._positions, new_pos])
+        
         self.current_pos += num_tokens
 
     def prune(self, island_indices: List[int], compressed_index: int = None):
         if not island_indices:
             return
             
-        island_arr = mx.array(island_indices, dtype=mx.int32)
-        # Use mx.where and mx.isin or similar to filter
-        # Since MLX doesn't have isin, we can use a loop or broadcasting for small island sets,
-        # but for efficiency we'll use a mask.
-        
-        # Mask: True if position is NOT in island_indices
-        mask = mx.ones(self._positions.shape, dtype=mx.bool_)
-        for idx in island_indices:
-            mask = mask & (self._positions != idx)
-            
+        # 🛑 FIX: Blazing fast Python set math. 
+        # completely eliminates the massive MLX boolean graph loop.
+        island_set = set(island_indices)
         if compressed_index is not None:
-            # Re-enable the compressed token if it was part of the island
-            mask = mask | (self._positions == compressed_index)
+            island_set.discard(compressed_index) # Re-enable if part of island
             
-        import numpy as np
-        indices = np.where(np.array(mask))[0].tolist()
-        self._positions = mx.take(self._positions, mx.array(indices, dtype=mx.int32))
+        self._position_list = [p for p in self._position_list if p not in island_set]
+        
+        # Single, clean push to VRAM
+        self._positions = mx.array(self._position_list, dtype=mx.int32)
 
     def get_positions(self) -> mx.array:
         return self._positions
@@ -65,35 +66,37 @@ class KVCacheManager:
             self.consolidator = MemoryConsolidator(model=model)
 
     def update(self, attention_matrix: mx.array, kv_caches: List[Tuple[mx.array, mx.array]], sinks: List[int], x: mx.array = None) -> List[Tuple[mx.array, mx.array]]:
-        if attention_matrix is None:
-            return kv_caches
-            
-        # --- Fuzzy Sinks Logic ---
-        a_2d = mx.mean(attention_matrix, axis=1)[0]
-        if len(a_2d.shape) == 2 and a_2d.shape[0] == 1:
-            a_sq = mx.squeeze(a_2d, axis=0) # Shape: [S] for decode
-        else:
-            a_sq = a_2d # Shape: [S, S] for prefill
-            
-        if len(a_sq.shape) == 1:
-            # Avoid full numpy conversion for all elements. 
-            # Only transfer indices that meet the threshold.
-            mask = a_sq > self.inheritance_threshold
-            if mx.any(mask):
-                import numpy as np
-                high_attn_indices = np.argwhere(np.array(mask)).tolist()
-                for rel_idx_list in high_attn_indices:
-                    rel_idx = rel_idx_list[0]
-                    if rel_idx < len(self.position_tracker.position_ids):
-                        abs_idx = self.position_tracker.position_ids[rel_idx]
-                        if abs_idx not in sinks:
-                            self.inherited_sinks.add(abs_idx)
+        action = "ALLOW"
+        island_indices = []
+        combined_sinks = sinks
         
-        combined_sinks = list(set(sinks) | self.inherited_sinks)
-
-        decision = self.cortex_hook.evaluate_attention(attention_matrix, combined_sinks, self.position_tracker.position_ids)
-        action = decision.get("action", "ALLOW")
-        island_indices = decision.get("island_indices", [])
+        if attention_matrix is not None:
+            # --- Fuzzy Sinks Logic ---
+            a_2d = mx.mean(attention_matrix, axis=1)[0]
+            if len(a_2d.shape) == 2 and a_2d.shape[0] == 1:
+                a_sq = mx.squeeze(a_2d, axis=0) # Shape: [S] for decode
+            else:
+                a_sq = a_2d # Shape: [S, S] for prefill
+                
+            if len(a_sq.shape) == 1:
+                # Avoid full numpy conversion for all elements. 
+                # Only transfer indices that meet the threshold.
+                mask = a_sq > self.inheritance_threshold
+                if mx.any(mask):
+                    import numpy as np
+                    high_attn_indices = np.argwhere(np.array(mask)).tolist()
+                    for rel_idx_list in high_attn_indices:
+                        rel_idx = rel_idx_list[0]
+                        if rel_idx < len(self.position_tracker.position_ids):
+                            abs_idx = self.position_tracker.position_ids[rel_idx]
+                            if abs_idx not in sinks:
+                                self.inherited_sinks.add(abs_idx)
+            
+            combined_sinks = list(set(sinks) | self.inherited_sinks)
+    
+            decision = self.cortex_hook.evaluate_attention(attention_matrix, combined_sinks, self.position_tracker.position_ids)
+            action = decision.get("action", "ALLOW")
+            island_indices = decision.get("island_indices", [])
         
         # --- HARD CAP ENFORCEMENT ---
         budget = getattr(self.cortex_hook, "max_context_budget", 4096)
@@ -117,7 +120,7 @@ class KVCacheManager:
             raise RuntimeError("τ-Spectral Pruner intercepted a Semantic Threat. Halting inference.")
 
         if action == "GARBAGE_COLLECT" and len(island_indices) > 0:
-            seq_len = attention_matrix.shape[-1]
+            seq_len = len(self.position_tracker.position_ids)
             island_set = set(island_indices)
             sink_set = set(combined_sinks)
             
@@ -142,13 +145,13 @@ class KVCacheManager:
             ]
             
             # --- V4 Memory Consolidation (Test-Time Training) ---
-            if self.enable_consolidation and x is not None and x.shape[1] == attention_matrix.shape[-1]:
+            if self.enable_consolidation and x is not None and attention_matrix is not None and x.shape[1] == attention_matrix.shape[-1]:
                 # 🛑 FIX: "Read-Only" Sandboxing to prevent AI Trauma
                 has_untrusted = any(self.position_tracker.position_ids[i] in self.untrusted_indices for i in island_physical_indices)
                 
                 if not has_untrusted:
                     salience = self.consolidator.evaluate_salience(attention_matrix, island_physical_indices)
-                    if salience > getattr(self.consolidator, "salience_threshold", 0.5):
+                    if salience >= getattr(self.consolidator, "salience_threshold", 0.5):
                         island_array = mx.array(island_physical_indices, dtype=mx.int32)
                         
                         # Extract the hidden states corresponding to the island tokens

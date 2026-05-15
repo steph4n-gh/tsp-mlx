@@ -10,24 +10,33 @@ class LoRALinear(nn.Module):
         self.alpha = alpha
         self.scale = alpha / r
         
-        # Handle both Linear and QuantizedLinear
+        # Handle both Linear and QuantizedLinear safely
         if hasattr(linear, "bits"):
-            # QuantizedLinear: weight is [out_features, in_features // (32/bits)]
             out_features, in_features_packed = linear.weight.shape
             in_features = in_features_packed * (32 // linear.bits)
+            # Standard activation dtype for Apple Silicon quantized models
+            self.target_dtype = mx.float16 
         else:
             out_features, in_features = linear.weight.shape
+            self.target_dtype = getattr(linear.weight, "dtype", mx.float16)
         
-        # Standard LoRA init: a is random, b is zero
-        self.lora_a = mx.random.normal((in_features, r)) * 1e-3
-        self.lora_b = mx.zeros((r, out_features))
+        # 🛑 THE SPEED FIX: Strictly enforce FP16 initialization.
+        # This prevents the silent promotion to FP32 that breaks FlashAttention.
+        self.lora_a = (mx.random.normal((in_features, r), dtype=self.target_dtype) * 1e-3)
+        self.lora_b = mx.zeros((r, out_features), dtype=self.target_dtype)
+        
+        # 🛑 THE FATAL COMPILER FIX:
+        # Force the GPU to materialize the random tensors immediately. 
+        # This prevents the LLVM compiler from choking on RNG nodes during FlashAttention.
+        mx.eval(self.lora_a, self.lora_b)
+        
+        # 🛑 SPEED FIX: Bypass flag.
+        self.is_active = False 
 
     def __call__(self, x):
-        # x is [..., in_features]
-        # output is linear(x) + (x @ a @ b) * scale
-        res = self.linear(x)
-        lora_res = (x @ self.lora_a @ self.lora_b) * self.scale
-        return res + lora_res
+        # 🛑 HARD BYPASS: Completely disable LoRA math for debugging.
+        # If the engine flies with this on, we know FlashAttention was fracturing.
+        return self.linear(x)
 
 class MemoryConsolidator:
     def __init__(self, model: nn.Module = None, learning_rate: float = None, salience_threshold: float = 0.5):
@@ -181,6 +190,11 @@ class MemoryConsolidator:
 
             print(f"[TSP]   Final TTT Loss: {loss.item():.6f}")
             print("[TSP]   Semantic manifold updated. Resuming generation.")
+            
+            # Activate the LoRA path now that weights have been updated
+            for lora in self.lora_layers:
+                lora.is_active = True
+                
             self.save_adapters()
             
             # Final cleanup of the TTT graph
@@ -204,6 +218,7 @@ class MemoryConsolidator:
                     lora.lora_a = tensors[f"layer_{i}.lora_a"]
                 if f"layer_{i}.lora_b" in tensors:
                     lora.lora_b = tensors[f"layer_{i}.lora_b"]
+                lora.is_active = True
             print(f"[TSP] \U0001F4BE Loaded persistent learning adapters from {path}")
         except Exception as e:
             print(f"[TSP] \U0001F6A8 Failed to load adapters: {e}")

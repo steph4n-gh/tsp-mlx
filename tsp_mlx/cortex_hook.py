@@ -90,13 +90,14 @@ class CortexHook:
         
         import numpy as np
         if len(a_sq.shape) == 2:
-            # Prefill or Incremental Prefill phase [L_new, L_total]
             L_new, L_total = a_sq.shape
             if L_new == L_total:
-                a_sym = mx.maximum(a_sq, a_sq.T)
-                thresholded = a_sym > self.threshold
+                # Full prefill
+                thresholded = a_sq > self.threshold
                 if mx.any(thresholded):
-                    indices = np.argwhere(np.array(thresholded)).tolist()
+                    indices_tensor = mx.argwhere(thresholded)
+                    mx.eval(indices_tensor)
+                    indices = indices_tensor.tolist()
                     for u_rel, v_rel in indices:
                         if u_rel != v_rel and u_rel < len(position_ids) and v_rel < len(position_ids):
                             self.edges.add((position_ids[u_rel], position_ids[v_rel]))
@@ -104,7 +105,9 @@ class CortexHook:
                 # Incremental prefill: a_sq is [L_new, L_total]
                 thresholded = a_sq > self.threshold
                 if mx.any(thresholded):
-                    indices = np.argwhere(np.array(thresholded)).tolist()
+                    indices_tensor = mx.argwhere(thresholded)
+                    mx.eval(indices_tensor)
+                    indices = indices_tensor.tolist()
                     for u_new, v_rel in indices:
                         if v_rel < L_total:
                             # The absolute position of the query
@@ -118,7 +121,12 @@ class CortexHook:
             # Decode phase [L_total]
             thresholded = a_sq > self.threshold
             if mx.any(thresholded):
-                indices = np.argwhere(np.array(thresholded)).tolist()
+                # 🛑 FIX: Use native MLX operations. Do not sync to numpy until the absolute last step.
+                # mx.argwhere returns a tensor. We evaluate just this tiny tensor.
+                indices_tensor = mx.argwhere(thresholded)
+                mx.eval(indices_tensor) # Single forced sync of a tiny array
+                
+                indices = indices_tensor.tolist()
                 
                 source_abs = position_ids[-1]
                 for target_rel_list in indices:

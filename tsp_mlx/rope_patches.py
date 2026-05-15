@@ -26,19 +26,31 @@ def patch_rope_for_sparse_positions(model: nn.Module, tracker: SparsePositionTra
             rope_cls = rope_layer.__class__
             
             class PatchedRoPE(rope_cls):
+                # Save a reference to the original, un-patched call method
+                orig_call = rope_cls.__call__
+
                 def __call__(self, x, offset=0, **kwargs):
                     seq_len = x.shape[2]
                     
+                    # 🛑 THE SPEED FIX: Complete Bypass for Prefill.
+                    # No .item() syncs. No graph fracturing. 
+                    # We natively accept the offset mlx_lm provides.
+                    if seq_len > 1:
+                        return PatchedRoPE.orig_call(self, x, offset=offset, **kwargs)
+
+                    # --- DECODE PHASE (L == 1) MANUAL SPARSE MATH ---
                     if hasattr(model, "_tsp_kv_manager") and model._tsp_kv_manager is not None:
                         current_tracker = model._tsp_kv_manager.position_tracker
                     else:
                         current_tracker = tracker
                         
                     all_positions = current_tracker.get_positions()
+                    
                     if all_positions.shape[0] < seq_len:
                         positions = mx.arange(offset, offset + seq_len, dtype=x.dtype)
                     else:
                         true_positions = all_positions[-seq_len:]
+                        # mx.array cast does NOT trigger a CPU sync, preserving graph integrity.
                         positions = mx.array(true_positions, dtype=x.dtype)
                     
                     scale = getattr(self, "scale", 1.0)
