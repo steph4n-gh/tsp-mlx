@@ -25,15 +25,21 @@ The system is fundamentally dependent on [**$\tau$-Gate**](https://github.com/st
 *   **Zero-Latency FFI:** Python utilizes `ctypes` to bridge directly to the compiled `tau-gate` Rust engine (`libtau_gate.dylib`), calculating Fiedler vectors without inter-process communication (IPC) overhead.
 *   **Graph Preservation:** Features like Test-Time Training (TTT) and Variance Compression execute within the Python MLX computation graph. This preserves lazy evaluation and enables automatic differentiation for real-time model updates.
 
-## Architectural Philosophy: Why Not RAG? (Perfect Memory vs. Intuition)
+## Perfect Memory via Holographic Paging
 
-Users seeking absolute, verbatim recall ("perfect memory") could easily extend TSP by piping the evicted "Thought Islands" into a Vector Database for Retrieval-Augmented Generation (RAG). However, TSP deliberately omits RAG from its default architecture for several critical reasons:
+Users seeking absolute, verbatim recall ("perfect memory") often bolt on external Vector Databases (RAG). However, RAG introduces severe latency, requires embedding models, and injects retrieved text out of its original structural context, violating TSP's core mandate as a lightweight, zero-latency VRAM manager.
 
-1.  **Zero-Dependency & Low Latency:** TSP is engineered to operate at the foundational matrix level. Introducing a Vector DB requires external dependencies, embedding models, and disk I/O, which violate TSP's core mandate as a lightweight, zero-latency VRAM manager.
-2.  **Intuition vs. Archival:** RAG acts as an external hard drive (L2 Cache), solving *data retrieval*. TSP focuses on the AI's *intuition and executive function*. Through Test-Time Training (TTT), TSP compresses concepts into the model's weights ("muscle memory"), prioritizing behavioral adaptation and style over verbatim text recall.
-3.  **Context Bloat:** RAG achieves recall by injecting old text back into the active prompt, inherently bloating the KV cache. TSP is designed to explicitly keep the KV cache mathematically lean.
+Instead, TSP implements **Holographic Paging**, exploiting Apple Silicon's Unified Memory architecture:
+1. When a block of context is evicted, it is compressed into a single, dense **Macro-Token** via variance weighting.
+2. The thousands of raw KV tensors are paged out of the active graph and parked in background system RAM.
+3. The LLM retains the Macro-Token in its active context. If the model's attention heavily activates upon this semantic anchor, TSP intercepts the spike, pauses generation, and instantly pages the exact, mathematically perfect raw KV tensors back into the active GPU cache. 
 
-**Extending TSP:** Developers are encouraged to combine TSP with their own RAG pipelines for composite memory: use TSP to keep the active GPU context pure, let the `MemoryConsolidator` bake behavioral nuances into the model's weights (TTT), and route the evicted tokens to a database for permanent archival.
+## Neuro-Somatic Security & Adversarial Defense
+
+A system that alters its own neural pathways at runtime introduces unique vulnerabilities. TSP implements three critical safeguards:
+1.  **Read-Only Context Sandboxing:** If an evicted Thought Island contains untrusted tokens, Test-Time Training (LoRA gradient updates) is mathematically aborted, preventing adversarial prompt injections from permanently poisoning the model's weights.
+2.  **Cryptographic Position Salting:** The Variance Compressor multiplies incoming token tensors by a cryptographically secure, session-specific random salt, making the semantic anchor's signature un-spoofable.
+3.  **The Semantic Firewall (Joint Attention Bounding):** By monitoring the attention matrix for simultaneous spikes on predefined "Threat Sinks" and "Execution Sinks", TSP issues a `FATAL_BLOCK` to halt inference before destructive commands are synthesized.
 
 ## Use Cases for Persistent Agents
 
@@ -50,6 +56,36 @@ TSP is designed for scenarios where LLMs run continuously and accumulate unbound
 *   **Local Processing:** Pruning and eigenvalue decomposition execute locally.
 *   **Heuristic Nature:** TSP's bisection is a topological heuristic, not a guaranteed semantic filter. It assumes tokens separated by a maximum spectral gap are irrelevant.
 *   **Sink Protection:** TSP allows developers to protect specific token ranges (sinks) from eviction.
+
+## Quickstart (The DX Wrapper)
+
+Integrating TSP into your own MLX projects is incredibly simple. We provide a high-level wrapper that handles the complex math, caching, and garbage collection for you:
+
+```python
+import asyncio
+from mlx_lm import load
+from tsp_mlx.generate import generate_with_tsp
+
+async def main():
+    model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+    
+    # 🛑 Untrusted tokens bypass permanent learning to prevent poisoning
+    untrusted = {5, 6, 7} 
+
+    # A single line handles initialization, RoPE patching, and inference
+    generator = generate_with_tsp(
+        model, tokenizer, 
+        prompt="Write a haiku about a cybernetic dragon.", 
+        max_tokens=50, 
+        untrusted_indices=untrusted
+    )
+    
+    async for text, stats in generator:
+        print(text, end="", flush=True)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
 
 ## Installation
 
