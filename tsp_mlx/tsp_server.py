@@ -118,7 +118,17 @@ async def chat_completions(req: ChatRequest):
                 if token_id == tokenizer.eos_token_id:
                     break
                 text = tokenizer.decode([token_id])
-                data = {"choices": [{"delta": {"content": text}}]}
+                
+                safe_stats = {
+                    "active_positions_count": len(stats.get("active_positions", [])),
+                    "total_evicted": stats.get("total_evicted", 0),
+                    "lambda_2": stats.get("lambda_2", 0.0)
+                }
+                
+                data = {
+                    "choices": [{"delta": {"content": text}}],
+                    "tsp_stats": safe_stats
+                }
                 yield f"data: {json.dumps(data)}\n\n"
             yield "data: [DONE]\n\n"
         finally:
@@ -174,6 +184,7 @@ def run_server():
         hook = CortexHook(eval_interval=10, threshold=0.9)
         manager = KVCacheManager(hook, model=model, enable_compression=True, enable_consolidation=True)
         manager.consolidator.salience_threshold = 0.0 
+        manager.consolidator.load_adapters()
         model._tsp_kv_manager = manager
         patch_attention_for_extraction(model)
         patch_rope_for_sparse_positions(model, manager.position_tracker)

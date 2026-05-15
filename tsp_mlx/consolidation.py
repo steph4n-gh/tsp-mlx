@@ -170,3 +170,26 @@ class MemoryConsolidator:
 
             print(f"[TSP]   Final TTT Loss: {loss.item():.6f}")
             print("[TSP]   Semantic manifold updated. Resuming generation.")
+            self.save_adapters()
+
+    def save_adapters(self, path="tsp_adapters.safetensors"):
+        tensors = {}
+        for i, lora in enumerate(self.lora_layers):
+            tensors[f"layer_{i}.lora_a"] = lora.lora_a
+            tensors[f"layer_{i}.lora_b"] = lora.lora_b
+        mx.save_safetensors(path, tensors)
+        print(f"[TSP]   Adapters saved to {path} (Permanent Learning).")
+
+    def load_adapters(self, path="tsp_adapters.safetensors"):
+        import os
+        if not os.path.exists(path): return
+        try:
+            tensors = mx.load(path)
+            for i, lora in enumerate(self.lora_layers):
+                if f"layer_{i}.lora_a" in tensors:
+                    lora.lora_a = tensors[f"layer_{i}.lora_a"]
+                if f"layer_{i}.lora_b" in tensors:
+                    lora.lora_b = tensors[f"layer_{i}.lora_b"]
+            print(f"[TSP] \U0001F4BE Loaded persistent learning adapters from {path}")
+        except Exception as e:
+            print(f"[TSP] \U0001F6A8 Failed to load adapters: {e}")
