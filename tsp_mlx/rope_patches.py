@@ -29,8 +29,17 @@ def patch_rope_for_sparse_positions(model: nn.Module, tracker: SparsePositionTra
                 def __call__(self, x, offset):
                     seq_len = x.shape[2]
                     
-                    true_positions = tracker.get_positions()[-seq_len:]
-                    positions = mx.array(true_positions, dtype=x.dtype)
+                    if hasattr(model, "_tsp_kv_manager") and model._tsp_kv_manager is not None:
+                        current_tracker = model._tsp_kv_manager.position_tracker
+                    else:
+                        current_tracker = tracker
+                        
+                    all_positions = current_tracker.get_positions()
+                    if all_positions.shape[0] < seq_len:
+                        positions = mx.arange(offset, offset + seq_len, dtype=x.dtype)
+                    else:
+                        true_positions = all_positions[-seq_len:]
+                        positions = mx.array(true_positions, dtype=x.dtype)
                     
                     scale = getattr(self, "scale", 1.0)
                     scaled_positions = positions.astype(mx.float32) * scale

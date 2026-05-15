@@ -63,6 +63,9 @@ class KVCacheManager:
             self.consolidator = MemoryConsolidator(model=model)
 
     def update(self, attention_matrix: mx.array, kv_caches: List[Tuple[mx.array, mx.array]], sinks: List[int], x: mx.array = None) -> List[Tuple[mx.array, mx.array]]:
+        if attention_matrix is None:
+            return kv_caches
+            
         # --- Fuzzy Sinks Logic ---
         a_2d = mx.mean(attention_matrix, axis=1)[0]
         if len(a_2d.shape) == 2 and a_2d.shape[0] == 1:
@@ -137,7 +140,7 @@ class KVCacheManager:
             ]
             
             # --- V4 Memory Consolidation (Test-Time Training) ---
-            if self.enable_consolidation and x is not None:
+            if self.enable_consolidation and x is not None and x.shape[1] == attention_matrix.shape[-1]:
                 salience = self.consolidator.evaluate_salience(attention_matrix, island_physical_indices)
                 if salience > getattr(self.consolidator, "salience_threshold", 0.5):
                     island_array = mx.array(island_physical_indices, dtype=mx.int32)

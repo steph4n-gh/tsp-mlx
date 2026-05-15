@@ -8,6 +8,7 @@ from tsp_mlx.cortex_hook import CortexHook
 from tsp_mlx.inference import generate_infinite_context
 from fastapi.responses import StreamingResponse
 import time
+import json
 
 app = FastAPI(title="\u03C4-Spectral Pruner API Harness")
 
@@ -87,41 +88,79 @@ async def chat_completions(req: ChatRequest):
     # so concurrent requests do not cross-contaminate the position_tracker arrays.
     from mlx_lm.models.cache import make_prompt_cache
     dummy_cache = make_prompt_cache(model)
-    _ = model(mx.array([[0]]), cache=dummy_cache)
+    dummy_logits = model(mx.array([[0]]), cache=dummy_cache)
     head_dim = dummy_cache[0].keys.shape[-1]
+    
+    # Evaluate and aggressively clear dummy run
+    mx.eval(dummy_logits)
+    for c in dummy_cache:
+        c.keys = None
+        c.values = None
+    del dummy_logits, dummy_cache
     
     hook = CortexHook(eval_interval=10, threshold=0.9)
     local_manager = KVCacheManager(hook, model=model, enable_compression=True, enable_consolidation=True, head_dim=head_dim)
     local_manager.consolidator.salience_threshold = 0.0 
+    model._tsp_kv_manager = local_manager
     
-    local_manager.position_tracker.step(seq_len)
+    # 🛑 CRITICAL: Force synchronization and evaluation in the request thread 
+    # before offloading to the StreamingResponse background thread.
+    mx.synchronize()
+    mx.eval(model.parameters())
 
     generator = generate_infinite_context(model, input_ids, max_tokens=req.max_tokens, kv_manager=local_manager)
     
-    def stream_tokens():
-        for token, stats in generator:
-            if token.item() == tokenizer.eos_token_id:
-                break
-            text = tokenizer.decode([token.item()])
-            yield f"data: {{\"choices\": [{{\"delta\": {{\"content\": \"{text}\"}}}}]}}\n\n"
-        yield "data: [DONE]\n\n"
+    async def stream_tokens():
+        nonlocal generator, local_manager
+        try:
+            async for token, stats in generator:
+                token_id = token.item()
+                if token_id == tokenizer.eos_token_id:
+                    break
+                text = tokenizer.decode([token_id])
+                data = {"choices": [{"delta": {"content": text}}]}
+                yield f"data: {json.dumps(data)}\n\n"
+            yield "data: [DONE]\n\n"
+        finally:
+            if hasattr(model, "_tsp_kv_manager"):
+                if model._tsp_kv_manager:
+                    model._tsp_kv_manager.last_attention_matrix = None
+                    model._tsp_kv_manager.last_hidden_states = None
+                model._tsp_kv_manager = None
+            generator = None
+            local_manager = None
+            import gc
+            mx.clear_cache()
+            gc.collect()
 
     if req.stream:
         return StreamingResponse(stream_tokens(), media_type="text/event-stream")
     else:
-        response_text = ""
-        for token, stats in generator:
-            if token.item() == tokenizer.eos_token_id:
-                break
-            response_text += tokenizer.decode([token.item()])
-        return {
-            "id": "chatcmpl-tsp",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": req.model,
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": response_text}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": len(input_ids[0]), "completion_tokens": len(tokenizer.encode(response_text)), "total_tokens": len(input_ids[0]) + len(tokenizer.encode(response_text))}
-        }
+        try:
+            response_text = ""
+            async for token, stats in generator:
+                if token.item() == tokenizer.eos_token_id:
+                    break
+                response_text += tokenizer.decode([token.item()])
+            return {
+                "id": "chatcmpl-tsp",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": req.model,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": response_text}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": len(input_ids[0]), "completion_tokens": len(tokenizer.encode(response_text)), "total_tokens": len(input_ids[0]) + len(tokenizer.encode(response_text))}
+            }
+        finally:
+            if hasattr(model, "_tsp_kv_manager"):
+                if model._tsp_kv_manager:
+                    model._tsp_kv_manager.last_attention_matrix = None
+                    model._tsp_kv_manager.last_hidden_states = None
+                model._tsp_kv_manager = None
+            generator = None
+            local_manager = None
+            import gc
+            mx.clear_cache()
+            gc.collect()
 
 def run_server():
     global model, tokenizer
@@ -130,11 +169,14 @@ def run_server():
     model_name = "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"
     print(f"Booting TSP API Harness ({model_name})...")
     try:
+        from tsp_mlx.inference import patch_attention_for_extraction, patch_rope_for_sparse_positions
         model, tokenizer = load(model_name)
         hook = CortexHook(eval_interval=10, threshold=0.9)
         manager = KVCacheManager(hook, model=model, enable_compression=True, enable_consolidation=True)
         manager.consolidator.salience_threshold = 0.0 
-        model.tsp_kv_manager = manager
+        model._tsp_kv_manager = manager
+        patch_attention_for_extraction(model)
+        patch_rope_for_sparse_positions(model, manager.position_tracker)
         print("\033[1;32m[SUCCESS] Model loaded and TSP Hook attached.\033[0m")
     except Exception as e:
         print(f"\033[1;31m[ERROR] Failed to load model: {e}\033[0m")

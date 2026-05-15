@@ -37,14 +37,15 @@ def patch_attention_for_extraction(model: nn.Module):
     orig_attn = getattr(last_layer, attn_attr)
 
     class AttentionWrapper(nn.Module):
-        def __init__(self, orig, global_model):
+        def __init__(self, orig):
             super().__init__()
             self.orig = orig
-            self._global_model = global_model
             for attr in dir(orig):
                 if not attr.startswith("__") and not callable(getattr(orig, attr)):
                     try:
-                        setattr(self, attr, getattr(orig, attr))
+                        val = getattr(orig, attr)
+                        if not isinstance(val, nn.Module):
+                            setattr(self, attr, val)
                     except AttributeError:
                         pass
 
@@ -53,58 +54,53 @@ def patch_attention_for_extraction(model: nn.Module):
                 queries, keys, values = self.orig.q_proj(x), self.orig.k_proj(x), self.orig.v_proj(x)
                 
                 B, L, _ = queries.shape
-                n_heads = getattr(self.orig, "n_heads", 1)
-                n_kv_heads = getattr(self.orig, "n_kv_heads", n_heads)
                 
-                queries = queries.reshape(B, L, n_heads, -1).transpose(0, 2, 1, 3)
-                keys = keys.reshape(B, L, n_kv_heads, -1).transpose(0, 2, 1, 3)
-                values = values.reshape(B, L, n_kv_heads, -1).transpose(0, 2, 1, 3)
+                # 🛑 FIX: Prevent OOM by skipping O(N^2) extraction during prefill.
+                # Only compute the manual attention matrix during decode (L == 1).
+                if L == 1 and hasattr(model, '_tsp_kv_manager') and model._tsp_kv_manager is not None:
+                    n_heads = getattr(self.orig, "n_heads", 1)
+                    n_kv_heads = getattr(self.orig, "n_kv_heads", n_heads)
+                    
+                    queries = queries.reshape(B, L, n_heads, -1).transpose(0, 2, 1, 3)
+                    keys = keys.reshape(B, L, n_kv_heads, -1).transpose(0, 2, 1, 3)
+                    values = values.reshape(B, L, n_kv_heads, -1).transpose(0, 2, 1, 3)
 
-                # 🛑 FIX: APPLY ROPE BEFORE DOT PRODUCT
-                if hasattr(self.orig, "rope"):
-                    current_offset = cache.offset if cache is not None else 0
-                    queries = self.orig.rope(queries, offset=current_offset)
-                    keys = self.orig.rope(keys, offset=current_offset)
-                
-                if cache is not None:
-                    if hasattr(cache, "keys"):
-                        k_cache, v_cache = cache.keys, cache.values
-                        if k_cache is not None:
-                            offset = getattr(cache, 'offset', k_cache.shape[2])
-                            k_cache = k_cache[:, :, :offset, :]
-                            full_keys = mx.concatenate([k_cache, keys], axis=2)
+                    if hasattr(self.orig, "rope"):
+                        current_offset = cache.offset if cache is not None else 0
+                        queries = self.orig.rope(queries, offset=current_offset)
+                        keys = self.orig.rope(keys, offset=current_offset)
+                    
+                    if cache is not None:
+                        if hasattr(cache, "keys"):
+                            k_cache, v_cache = cache.keys, cache.values
+                            if k_cache is not None:
+                                offset = getattr(cache, 'offset', k_cache.shape[2])
+                                k_cache = k_cache[:, :, :offset, :]
+                                full_keys = mx.concatenate([k_cache, keys], axis=2)
+                            else:
+                                full_keys = keys
                         else:
-                            full_keys = keys
+                             full_keys = keys 
                     else:
-                         full_keys = keys 
-                else:
-                    full_keys = keys
+                        full_keys = keys
 
-                if n_heads != n_kv_heads:
-                    repeats = n_heads // n_kv_heads
-                    full_keys = mx.repeat(full_keys, repeats, axis=1)
+                    if n_heads != n_kv_heads:
+                        repeats = n_heads // n_kv_heads
+                        full_keys = mx.repeat(full_keys, repeats, axis=1)
 
-                scale = 1.0 / mx.sqrt(queries.shape[-1])
-                scores = (queries * scale) @ full_keys.transpose(0, 1, 3, 2)
-                
-                # 🛑 FIX: APPLY CAUSAL MASK AND SOFTMAX
-                L_q, L_k = scores.shape[2], scores.shape[3]
-                if L_q > 1:  
-                    mask_offset = L_k - L_q + 1 
-                    causal_mask = mx.triu(mx.full((L_q, L_k), -float('inf')), k=mask_offset)
-                    scores = scores + causal_mask
-
-                attn_weights = mx.softmax(scores.astype(mx.float32), axis=-1).astype(scores.dtype)
-                if hasattr(self._global_model, '_tsp_kv_manager'):
-                    self._global_model._tsp_kv_manager.last_attention_matrix = attn_weights 
-                    self._global_model._tsp_kv_manager.last_hidden_states = x # Capture x for TTT
+                    scale = 1.0 / mx.sqrt(queries.shape[-1])
+                    scores = (queries * scale) @ full_keys.transpose(0, 1, 3, 2)
+                    
+                    attn_weights = mx.softmax(scores.astype(mx.float32), axis=-1).astype(scores.dtype)
+                    model._tsp_kv_manager.last_attention_matrix = attn_weights 
+                    model._tsp_kv_manager.last_hidden_states = x # Capture x for TTT
             
             return self.orig(x, mask=mask, cache=cache, **kwargs)
 
-    setattr(last_layer, attn_attr, AttentionWrapper(orig_attn, model))
+    setattr(last_layer, attn_attr, AttentionWrapper(orig_attn))
 
 
-def generate_infinite_context(
+async def generate_infinite_context(
     model: nn.Module, 
     prompt: mx.array, 
     max_tokens: int = 1000,
@@ -113,6 +109,7 @@ def generate_infinite_context(
     """
     Yields (token, stats_dict) for instrumentation.
     """
+    import asyncio
     if kv_manager is None:
         if not hasattr(model, '_tsp_kv_manager'):
             # Use the default library path search logic in CortexHook
@@ -162,10 +159,24 @@ def generate_infinite_context(
                     cache_obj.values = pv
                     cache_obj.offset = pk.shape[2] 
             
+            kv_manager.last_attention_matrix = None
+            kv_manager.last_hidden_states = None
+            
+            cache_tensors = []
+            for c in kv_caches:
+                if c.keys is not None: cache_tensors.append(c.keys)
+                if c.values is not None: cache_tensors.append(c.values)
+            
             # 🛑 CRITICAL: Clear the computation graph to prevent memory leaks
-            mx.eval(y, kv_caches, kv_manager.position_tracker.get_positions())
+            mx.synchronize()
+            mx.eval(y, kv_manager.position_tracker.get_positions(), *cache_tensors)
         else:
-            mx.eval(y, kv_caches)
+            cache_tensors = []
+            for c in kv_caches:
+                if c.keys is not None: cache_tensors.append(c.keys)
+                if c.values is not None: cache_tensors.append(c.values)
+            mx.synchronize()
+            mx.eval(y, *cache_tensors)
         
         stats = {
             "active_positions": kv_manager.position_tracker.position_ids.copy(),
@@ -173,4 +184,12 @@ def generate_infinite_context(
             "lambda_2": lambda_2
         }
         yield y, stats
+        
+        # 🛑 FIX: Prevent JIT/Buffer Cache OOM during long generations.
+        # Dynamic pruning causes unique graph shapes, which MLX caches forever.
+        # We must explicitly flush the cache periodically.
+        if i > 0 and i % 100 == 0:
+            mx.clear_cache()
+            
+        await asyncio.sleep(0)
 

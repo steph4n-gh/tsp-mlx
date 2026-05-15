@@ -58,6 +58,8 @@ class MemoryConsolidator:
                 break
                 
         if first_v_proj is not None:
+            if isinstance(first_v_proj, LoRALinear):
+                first_v_proj = first_v_proj.linear
             if hasattr(first_v_proj, "bits"):
                 bits = first_v_proj.bits
                 if bits <= 4:
@@ -83,6 +85,8 @@ class MemoryConsolidator:
         if layers is None:
             return
             
+        self.model.freeze()
+            
         for layer in layers:
             # Most MLX models use 'v_proj'
             if hasattr(layer.self_attn, "v_proj"):
@@ -91,6 +95,12 @@ class MemoryConsolidator:
                     lora_v = LoRALinear(orig_v_proj)
                     layer.self_attn.v_proj = lora_v
                     self.lora_layers.append(lora_v)
+                else:
+                    self.lora_layers.append(orig_v_proj)
+                    
+        for lora in self.lora_layers:
+            lora.unfreeze()
+            lora.linear.freeze()
 
     def evaluate_salience(self, attention_matrix: mx.array, island_physical_indices: list) -> float:
         if len(island_physical_indices) < 2:
@@ -122,45 +132,41 @@ class MemoryConsolidator:
         print("\n[TSP] \U0001F9E0 MEMORY CONSOLIDATION TRIGGERED!")
         print("[TSP]   Performing True Test-Time Training (TTT) via LoRA...")
         
-        # x_island: [B, L_island, D]
-        # v_island: [B, n_heads, L_island, head_dim]
-        # We need to reshape v_island to match the output of a linear layer [B, L, D]
-        # where D = n_heads * head_dim
-        B, n_heads, L, head_dim = v_island.shape
-        v_target = v_island.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        
-        # 🛑 CRITICAL FIX: DETACH TENSORS FROM THE MAIN GRAPH 
-        x_island = mx.stop_gradient(x_island)
-        v_target = mx.stop_gradient(v_target)
-        
-        def loss_fn(model_params):
-            total_loss = 0
-            for lora in self.lora_layers:
-                # We are learning the mapping x -> v
-                # The lora layer already contains the original linear layer + adapter
-                v_pred = lora(x_island)
-                total_loss += mx.mean(mx.square(v_pred - v_target))
-            return total_loss / len(self.lora_layers)
-
-        loss_and_grad_fn = nn.value_and_grad(self.model, loss_fn)
-        
-        # Perform 3-5 steps of optimization
-        for step in range(3):
-            loss, grads = loss_and_grad_fn(self.model.parameters())
+        with mx.stream(mx.gpu):
+            # x_island: [B, L_island, D]
+            # v_island: [B, n_heads, L_island, head_dim]
+            # We need to reshape v_island to match the output of a linear layer [B, L, D]
+            # where D = n_heads * head_dim
+            B, n_heads, L, head_dim = v_island.shape
+            v_target = v_island.transpose(0, 2, 1, 3).reshape(B, L, -1)
             
-            # 🛑 CRITICAL FIX: Clip gradients to prevent NaN explosion when training on 4-bit models
-            if self.max_grad_norm is not None:
-                grads, _ = optim.clip_grad_norm(grads, max_norm=self.max_grad_norm)
+            # 🛑 CRITICAL FIX: DETACH TENSORS FROM THE MAIN GRAPH 
+            x_island = mx.stop_gradient(x_island)
+            v_target = mx.stop_gradient(v_target)
             
-            from mlx.utils import tree_flatten
-            for k, v in tree_flatten(grads):
-                if isinstance(v, mx.array) and len(v.shape) == 4:
-                    print(f"DEBUG GRAD 4D: {k} = {v.shape}")
-                    
-            self.optimizer.update(self.model, grads)
-            mx.eval(self.model.parameters(), self.optimizer.state)
-            if step == 0:
-                print(f"[TSP]   Initial TTT Loss: {loss.item():.6f}")
+            def loss_fn(model_params):
+                total_loss = 0
+                for lora in self.lora_layers:
+                    # We are learning the mapping x -> v
+                    # The lora layer already contains the original linear layer + adapter
+                    v_pred = lora(x_island)
+                    total_loss += mx.mean(mx.square(v_pred - v_target))
+                return total_loss / len(self.lora_layers)
 
-        print(f"[TSP]   Final TTT Loss: {loss.item():.6f}")
-        print("[TSP]   Semantic manifold updated. Resuming generation.")
+            loss_and_grad_fn = nn.value_and_grad(self.model, loss_fn)
+            
+            # Perform 3-5 steps of optimization
+            for step in range(3):
+                loss, grads = loss_and_grad_fn(self.model)
+                
+                # 🛑 CRITICAL FIX: Clip gradients to prevent NaN explosion when training on 4-bit models
+                if self.max_grad_norm is not None:
+                    grads, _ = optim.clip_grad_norm(grads, max_norm=self.max_grad_norm)
+                
+                self.optimizer.update(self.model, grads)
+                mx.eval(self.model.trainable_parameters(), self.optimizer.state)
+                if step == 0:
+                    print(f"[TSP]   Initial TTT Loss: {loss.item():.6f}")
+
+            print(f"[TSP]   Final TTT Loss: {loss.item():.6f}")
+            print("[TSP]   Semantic manifold updated. Resuming generation.")

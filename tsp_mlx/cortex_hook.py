@@ -112,9 +112,12 @@ class CortexHook:
             return {"action": "ALLOW", "island_indices": []}
 
         # --- FFI Call ---
+        # Map absolute IDs to relative indices for the Rust graph engine
+        id_to_rel = {pid: i for i, pid in enumerate(position_ids)}
         flat_edges = []
-        for u, v in self.edges:
-            flat_edges.extend([u, v])
+        for u_abs, v_abs in self.edges:
+            if u_abs in id_to_rel and v_abs in id_to_rel:
+                flat_edges.extend([id_to_rel[u_abs], id_to_rel[v_abs]])
             
         edges_ptr = (ctypes.c_int * len(flat_edges))(*flat_edges)
         
@@ -122,7 +125,7 @@ class CortexHook:
         nodes_ptr = (ctypes.c_char_p * len(node_names))(*node_names)
         
         result_ptr = self.lib.tau_gate_analyze(
-            edges_ptr, len(self.edges),
+            edges_ptr, len(flat_edges) // 2,
             nodes_ptr, len(position_ids)
         )
         
