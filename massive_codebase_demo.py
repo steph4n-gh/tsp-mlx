@@ -10,7 +10,7 @@ import time
 def clear_screen():
     print("\033[2J\033[H", end="")
 
-def print_dashboard(total_gen, active_ids, evicted, lambda2, step_name, action_log=""):
+def print_dashboard(total_gen, active_ids, evicted, lambda2, step_name, topological_pages=0, action_log=""):
     clear_screen()
     print(f"\033[1;37m[\u03C4-Spectral Pruner] MASSIVE CODEBASE DEMO\033[0m")
     print(f"\033[1;35mExecuting on: \033[1mQwen2.5-Coder-7B-Instruct\033[0m")
@@ -22,6 +22,7 @@ def print_dashboard(total_gen, active_ids, evicted, lambda2, step_name, action_l
     print(f"  \u25B6 \033[1mTotal Context History:\033[0m  {total_gen} tokens")
     print(f"  \u25B6 \033[1mActive Tokens In VRAM:\033[0m  {len(active_ids)} tokens")
     print(f"  \u25B6 \033[1mDead Code Evicted:\033[0m      {evicted} tokens saved")
+    print(f"  \u25B6 \033[1mTopological Pages:\033[0m      {topological_pages} Macro-Tokens parked in RAM")
     print(f"  \u25B6 \033[1mSemantic Graph Gap:\033[0m     {lambda2:.8f} (\u03BB\u2082)")
     
     if action_log:
@@ -105,7 +106,7 @@ async def main():
             else:
                  manager.position_tracker.step(seq_len - manager.position_tracker._positions.shape[0])
             
-            print_dashboard(seq_len, manager.position_tracker.position_ids, 0, 0.0, step["phase"])
+            print_dashboard(seq_len, manager.position_tracker.position_ids, 0, 0.0, step["phase"], len(manager.topological_pages))
             print(f"{step['input']}\n")
             print(f"{step['simulated_output']}")
             time.sleep(2)
@@ -122,7 +123,7 @@ async def main():
         last_evicted = 0
         action_log = ""
         
-        print_dashboard(total_gen, manager.position_tracker.position_ids, 0, 0.0, step["phase"])
+        print_dashboard(total_gen, manager.position_tracker.position_ids, 0, 0.0, step["phase"], len(manager.topological_pages))
         print(f"{step['input']}\n")
         
         async for token, stats in generator:
@@ -139,7 +140,7 @@ async def main():
                 action_log = f"\u26A0\uFE0F CODEBASE PRUNED: Evicted {diff} tokens. Irrelevant files (Network, UI, DB) removed from VRAM."
                 last_evicted = stats["total_evicted"]
             
-            print_dashboard(total_gen, stats["active_positions"], stats["total_evicted"], stats["lambda_2"], step["phase"], action_log)
+            print_dashboard(total_gen, stats["active_positions"], stats["total_evicted"], stats["lambda_2"], step["phase"], len(manager.topological_pages), action_log)
             print(f"{step['input']}\n")
             print(f"> {response}", end="", flush=True)
             

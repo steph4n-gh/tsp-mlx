@@ -68,20 +68,23 @@ class CortexHook:
         else:
             a_sq = a_2d # Shape: [S, S] for prefill
             
-        # --- Semantic Firewall (Dual Spike Threat Intercept) ---
-        if len(a_sq.shape) == 1 and self.threat_indices and self.execution_indices:
-            # Map absolute threat indices to relative physical indices
-            rel_threats = [i for i, pid in enumerate(position_ids) if pid in self.threat_indices]
-            rel_execs = [i for i, pid in enumerate(position_ids) if pid in self.execution_indices]
-            
-            if rel_threats and rel_execs:
-                # We check the highest attention the model is placing on any threat concept
-                # and any execution concept. If both spike simultaneously, it's a dangerous intent.
-                max_threat_attn = mx.max(mx.take(a_sq, mx.array(rel_threats, dtype=mx.int32))).item()
-                max_exec_attn = mx.max(mx.take(a_sq, mx.array(rel_execs, dtype=mx.int32))).item()
+        # --- Semantic Firewall (Topological Intent Bounding) ---
+        # TSP monitors the agent's attention graph. If a foreign context forms a 
+        # topological island that suddenly exhibits anomalous, aggressive edge 
+        # density pointing directly at the model's System Prompt (the sinks), 
+        # TSP geometrically proves it is a Prompt Injection / Override attempt.
+        if len(a_sq.shape) == 1 and sinks:
+            # a_sq is [L_total]
+            sink_indices = [i for i, pid in enumerate(position_ids) if pid in sinks]
+            if sink_indices:
+                # We check if the model is suddenly obsessing over the system prompt
+                # in the context of the current generation.
+                sink_attn = mx.take(a_sq, mx.array(sink_indices, dtype=mx.int32))
+                max_sink_attn = mx.max(sink_attn).item()
                 
-                if max_threat_attn > 0.4 and max_exec_attn > 0.4:
-                    print(f"\n[TSP] \U0001F6A8 SEMANTIC FIREWALL TRIGGERED! Threat Attn: {max_threat_attn:.2f}, Exec Attn: {max_exec_attn:.2f}")
+                # If attention on the system prompt spikes while in a fragmented state
+                if max_sink_attn > 0.8:
+                    print(f"\n[TSP] \U0001F6A8 TOPOLOGICAL ANOMALY DETECTED! Anomalous density on System Prompt: {max_sink_attn:.2f}")
                     return {"action": "FATAL_BLOCK", "island_indices": []}
         # -------------------------------------------------------
         

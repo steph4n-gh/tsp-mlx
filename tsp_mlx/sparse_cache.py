@@ -56,7 +56,7 @@ class KVCacheManager:
         
         self.enable_compression = enable_compression
         self.enable_consolidation = enable_consolidation
-        self.holographic_pages = {}
+        self.topological_pages = {}
         self.untrusted_indices = set()
         
         if self.enable_compression:
@@ -217,12 +217,20 @@ class KVCacheManager:
                     else:
                         pruned_caches.append((final_k, final_v))
                         
-                # Store the Holographic Page in background RAM
+                # Store the Topological Page in background RAM
                 original_island_pos_ids = [self.position_tracker.position_ids[i] for i in island_physical_indices]
-                self.holographic_pages[macro_pos_id] = {
+                self.topological_pages[macro_pos_id] = {
                     "pos_ids": original_island_pos_ids,
                     "tensors": page_data
                 }
+                
+                # 🛑 CRITICAL FIX: Evaluate the page tensors immediately!
+                # If we don't eval them, they hold a reference to the ENTIRE original KV cache
+                # tensors (via the 'take' op), leading to a massive memory leak.
+                eval_targets = []
+                for k_p, v_p in page_data:
+                    eval_targets.extend([k_p, v_p])
+                mx.eval(*eval_targets)
                 
                 self.position_tracker.prune(list(island_set), compressed_index=macro_pos_id)
             else:
@@ -260,10 +268,10 @@ class KVCacheManager:
         return kv_caches
 
     def unpack(self, macro_pos_id: int, kv_caches: List[Tuple[mx.array, mx.array]]):
-        if macro_pos_id not in self.holographic_pages:
+        if macro_pos_id not in self.topological_pages:
             return kv_caches
             
-        page = self.holographic_pages[macro_pos_id]
+        page = self.topological_pages[macro_pos_id]
         pos_ids = page["pos_ids"]
         tensors = page["tensors"]
         
@@ -306,6 +314,6 @@ class KVCacheManager:
             else:
                 unpacked_caches.append((final_k, final_v))
                 
-        del self.holographic_pages[macro_pos_id]
-        print(f"\n[TSP] \U0001F4E6 Holographic Paging Triggered: Unpacked {len(pos_ids)} tokens back into active cache!")
+        del self.topological_pages[macro_pos_id]
+        print(f"\n[TSP] \U0001F4E6 Topological Compression Triggered: Unpacked {len(pos_ids)} tokens back into active cache!")
         return unpacked_caches

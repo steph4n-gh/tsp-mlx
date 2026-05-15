@@ -144,12 +144,22 @@ class MemoryConsolidator:
             x_island = mx.stop_gradient(x_island)
             v_target = mx.stop_gradient(v_target)
             
+            # Materialize them immediately to prevent holding onto the entire hidden state graph
+            mx.eval(x_island, v_target)
+            
+            # 🚀 OPTIMIZATION: Pre-calculate the output of the frozen linear layers once.
+            # This avoids re-running 28+ large linear layers 3-5 times in the loop.
+            frozen_outputs = []
+            for lora in self.lora_layers:
+                frozen_outputs.append(mx.stop_gradient(lora.linear(x_island)))
+            mx.eval(frozen_outputs)
+
             def loss_fn(model_params):
                 total_loss = 0
-                for lora in self.lora_layers:
-                    # We are learning the mapping x -> v
-                    # The lora layer already contains the original linear layer + adapter
-                    v_pred = lora(x_island)
+                for i, lora in enumerate(self.lora_layers):
+                    # Optimized: Only compute the LoRA path during the optimization loop
+                    lora_res = (x_island @ lora.lora_a @ lora.lora_b) * lora.scale
+                    v_pred = frozen_outputs[i] + lora_res
                     total_loss += mx.mean(mx.square(v_pred - v_target))
                 return total_loss / len(self.lora_layers)
 
@@ -171,6 +181,9 @@ class MemoryConsolidator:
             print(f"[TSP]   Final TTT Loss: {loss.item():.6f}")
             print("[TSP]   Semantic manifold updated. Resuming generation.")
             self.save_adapters()
+            
+            # Final cleanup of the TTT graph
+            mx.clear_cache()
 
     def save_adapters(self, path="tsp_adapters.safetensors"):
         tensors = {}

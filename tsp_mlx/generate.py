@@ -23,7 +23,7 @@ def setup_tsp(model, head_dim: int = 128, enable_compression: bool = True, enabl
     patch_rope_for_sparse_positions(model, manager.position_tracker)
     return manager
 
-async def generate_with_tsp(model, tokenizer, prompt: str, max_tokens: int = 100, head_dim: int = 128, untrusted_indices: set = None, **kwargs):
+async def generate_with_tsp(model, tokenizer, prompt: str, max_tokens: int = 100, head_dim: int = 128, untrusted_indices: set = None, temp: float = 0.0, **kwargs):
     """
     A high-level wrapper for generation that handles all TSP loop complexity.
     Yields (text_chunk, stats_dict).
@@ -44,7 +44,7 @@ async def generate_with_tsp(model, tokenizer, prompt: str, max_tokens: int = 100
     mx.synchronize()
     mx.eval(model.parameters())
     
-    generator = generate_infinite_context(model, input_ids, max_tokens=max_tokens, kv_manager=manager)
+    generator = generate_infinite_context(model, input_ids, max_tokens=max_tokens, kv_manager=manager, temp=temp)
     
     try:
         async for token, stats in generator:

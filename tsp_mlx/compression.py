@@ -9,7 +9,7 @@ class VarianceCompressor:
     def __init__(self, hidden_dim: int, tau_wiggle: float = 0.05):
         self.hidden_dim = hidden_dim
         self.tau_wiggle = tau_wiggle
-        # 🛑 FIX: Cryptographic Position Salting to prevent Holographic Spoofing
+        # 🛑 FIX: Cryptographic Position Salting to prevent Topological Spoofing
         self.session_salt = mx.random.normal((1, 1, 1, hidden_dim)) * 0.1 + 1.0
         
     def __call__(self, island_tensors: mx.array) -> mx.array:

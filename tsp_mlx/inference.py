@@ -104,7 +104,8 @@ async def generate_infinite_context(
     model: nn.Module, 
     prompt: mx.array, 
     max_tokens: int = 1000,
-    kv_manager = None
+    kv_manager = None,
+    temp: float = 0.0
 ) -> Generator[Tuple[mx.array, dict], None, None]:
     """
     Yields (token, stats_dict) for instrumentation.
@@ -128,27 +129,32 @@ async def generate_infinite_context(
             kv_manager.position_tracker.position_ids = []
             kv_manager.position_tracker.current_pos = 0
             kv_manager.cortex_hook.edges = set()
+            if hasattr(kv_manager, 'topological_pages'):
+                kv_manager.topological_pages.clear()
             
     y = prompt
     total_evicted = 0
     lambda_2 = 0.0
     
-    for i in range(max_tokens):
-        kv_manager.position_tracker.step(y.shape[1])
-        
-        logits = model(y, cache=kv_caches)
-        y = mx.argmax(logits[:, -1, :], axis=-1, keepdims=True)
-        
-        if hasattr(kv_manager, 'last_attention_matrix'):
-            attn_matrix = kv_manager.last_attention_matrix
-            hidden_states = getattr(kv_manager, 'last_hidden_states', None)
+    try:
+        for i in range(max_tokens):
+            kv_manager.position_tracker.step(y.shape[1])
             
-            # --- Holographic Paging Unpack Trigger ---
-            if attn_matrix is not None and y.shape[1] == 1 and hasattr(kv_manager, 'holographic_pages'):
+            logits = model(y, cache=kv_caches)
+            
+            if temp > 0:
+                logits_step = logits[:, -1, :] / temp
+                y = mx.random.categorical(logits_step, num_samples=1)
+            else:
+                y = mx.argmax(logits[:, -1, :], axis=-1, keepdims=True)
+            
+            # --- Topological Compression Unpack Trigger ---
+            if hasattr(kv_manager, 'last_attention_matrix') and kv_manager.last_attention_matrix is not None and y.shape[1] == 1 and hasattr(kv_manager, 'topological_pages'):
+                attn_matrix = kv_manager.last_attention_matrix
                 # attn_matrix shape during decode: [B, H, 1, Lk]
                 attn_mean = mx.mean(attn_matrix, axis=1)[0, 0]
                 unpack_targets = []
-                for macro_pos_id in list(kv_manager.holographic_pages.keys()):
+                for macro_pos_id in list(kv_manager.topological_pages.keys()):
                     try:
                         physical_idx = kv_manager.position_tracker.position_ids.index(macro_pos_id)
                         if physical_idx < attn_mean.shape[0]:
@@ -162,55 +168,65 @@ async def generate_infinite_context(
                     kv_caches = kv_manager.unpack(target, kv_caches)
             # -----------------------------------------
             
-            raw_caches = [(c.keys, c.values) for c in kv_caches]
-            before_len = kv_manager.position_tracker.get_positions().shape[0]
+            if hasattr(kv_manager, 'last_attention_matrix') and kv_manager.last_attention_matrix is not None:
+                attn_matrix = kv_manager.last_attention_matrix
+                hidden_states = getattr(kv_manager, 'last_hidden_states', None)
+                
+                raw_caches = [(c.keys, c.values) for c in kv_caches]
+                before_len = kv_manager.position_tracker.get_positions().shape[0]
+                
+                # Use sinks = [0,1,2,3,4] to protect system prompt
+                pruned_raw_caches = kv_manager.update(attn_matrix, raw_caches, sinks=[0, 1, 2, 3, 4], x=hidden_states)
+                
+                after_len = kv_manager.position_tracker.get_positions().shape[0]
+                total_evicted += (before_len - after_len)
+                
+                if hasattr(kv_manager.cortex_hook, 'last_lambda_2'):
+                    lambda_2 = kv_manager.cortex_hook.last_lambda_2
+                
+                if pruned_raw_caches is not raw_caches:
+                    for cache_obj, (pk, pv) in zip(kv_caches, pruned_raw_caches):
+                        cache_obj.keys = pk
+                        cache_obj.values = pv
+                        cache_obj.offset = pk.shape[2] 
+                
+                kv_manager.last_attention_matrix = None
+                kv_manager.last_hidden_states = None
+                
+                cache_tensors = []
+                for c in kv_caches:
+                    if c.keys is not None: cache_tensors.append(c.keys)
+                    if c.values is not None: cache_tensors.append(c.values)
+                
+                # 🛑 CRITICAL: Clear the computation graph to prevent memory leaks
+                mx.synchronize()
+                mx.eval(y, kv_manager.position_tracker.get_positions(), *cache_tensors)
+            else:
+                cache_tensors = []
+                for c in kv_caches:
+                    if c.keys is not None: cache_tensors.append(c.keys)
+                    if c.values is not None: cache_tensors.append(c.values)
+                mx.synchronize()
+                mx.eval(y, *cache_tensors)
             
-            # Use sinks = [0,1,2,3,4] to protect system prompt
-            pruned_raw_caches = kv_manager.update(attn_matrix, raw_caches, sinks=[0, 1, 2, 3, 4], x=hidden_states)
+            stats = {
+                "active_positions": kv_manager.position_tracker.position_ids.copy(),
+                "total_evicted": total_evicted,
+                "lambda_2": lambda_2
+            }
+            yield y, stats
             
-            after_len = kv_manager.position_tracker.get_positions().shape[0]
-            total_evicted += (before_len - after_len)
-            
-            if hasattr(kv_manager.cortex_hook, 'last_lambda_2'):
-                lambda_2 = kv_manager.cortex_hook.last_lambda_2
-            
-            if pruned_raw_caches is not raw_caches:
-                for cache_obj, (pk, pv) in zip(kv_caches, pruned_raw_caches):
-                    cache_obj.keys = pk
-                    cache_obj.values = pv
-                    cache_obj.offset = pk.shape[2] 
-            
+            # 🛑 FIX: Prevent JIT/Buffer Cache OOM during long generations.
+            # Dynamic pruning causes unique graph shapes, which MLX caches forever.
+            # We must explicitly flush the cache periodically.
+            if i > 0 and i % 100 == 0:
+                mx.clear_cache()
+                
+            await asyncio.sleep(0)
+    finally:
+        # Guarantee rigorous Garbage Collection
+        if kv_manager is not None:
             kv_manager.last_attention_matrix = None
             kv_manager.last_hidden_states = None
-            
-            cache_tensors = []
-            for c in kv_caches:
-                if c.keys is not None: cache_tensors.append(c.keys)
-                if c.values is not None: cache_tensors.append(c.values)
-            
-            # 🛑 CRITICAL: Clear the computation graph to prevent memory leaks
-            mx.synchronize()
-            mx.eval(y, kv_manager.position_tracker.get_positions(), *cache_tensors)
-        else:
-            cache_tensors = []
-            for c in kv_caches:
-                if c.keys is not None: cache_tensors.append(c.keys)
-                if c.values is not None: cache_tensors.append(c.values)
-            mx.synchronize()
-            mx.eval(y, *cache_tensors)
-        
-        stats = {
-            "active_positions": kv_manager.position_tracker.position_ids.copy(),
-            "total_evicted": total_evicted,
-            "lambda_2": lambda_2
-        }
-        yield y, stats
-        
-        # 🛑 FIX: Prevent JIT/Buffer Cache OOM during long generations.
-        # Dynamic pruning causes unique graph shapes, which MLX caches forever.
-        # We must explicitly flush the cache periodically.
-        if i > 0 and i % 100 == 0:
-            mx.clear_cache()
-            
-        await asyncio.sleep(0)
+        mx.clear_cache()
 
