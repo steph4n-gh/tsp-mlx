@@ -44,6 +44,8 @@ class CortexHook:
         self.edges = set()
         self.last_lambda_2 = 0.0
         self.lambda_2_history = []
+        self.threat_indices = set()
+        self.execution_indices = set()
 
     def evaluate_attention(self, attention_matrix: mx.array, sinks: List[int], position_ids: List[int]) -> Dict[str, Any]:
         self.token_counter += 1
@@ -65,6 +67,23 @@ class CortexHook:
             a_sq = mx.squeeze(a_2d, axis=0) # Shape: [S] for decode
         else:
             a_sq = a_2d # Shape: [S, S] for prefill
+            
+        # --- Semantic Firewall (Dual Spike Threat Intercept) ---
+        if len(a_sq.shape) == 1 and self.threat_indices and self.execution_indices:
+            # Map absolute threat indices to relative physical indices
+            rel_threats = [i for i, pid in enumerate(position_ids) if pid in self.threat_indices]
+            rel_execs = [i for i, pid in enumerate(position_ids) if pid in self.execution_indices]
+            
+            if rel_threats and rel_execs:
+                # We check the highest attention the model is placing on any threat concept
+                # and any execution concept. If both spike simultaneously, it's a dangerous intent.
+                max_threat_attn = mx.max(mx.take(a_sq, mx.array(rel_threats, dtype=mx.int32))).item()
+                max_exec_attn = mx.max(mx.take(a_sq, mx.array(rel_execs, dtype=mx.int32))).item()
+                
+                if max_threat_attn > 0.4 and max_exec_attn > 0.4:
+                    print(f"\n[TSP] \U0001F6A8 SEMANTIC FIREWALL TRIGGERED! Threat Attn: {max_threat_attn:.2f}, Exec Attn: {max_exec_attn:.2f}")
+                    return {"action": "FATAL_BLOCK", "island_indices": []}
+        # -------------------------------------------------------
         
         import numpy as np
         if len(a_sq.shape) == 2:

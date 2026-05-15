@@ -8,7 +8,10 @@ from tsp_mlx.cortex_hook import CortexHook
 from tsp_mlx.inference import generate_infinite_context
 from fastapi.responses import StreamingResponse
 import time
-import json
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("tsp_server")
 
 app = FastAPI(title="\u03C4-Spectral Pruner API Harness")
 
@@ -177,7 +180,7 @@ def run_server():
     import uvicorn
     
     model_name = "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"
-    print(f"Booting TSP API Harness ({model_name})...")
+    logger.info(f"Booting TSP API Harness ({model_name})...")
     try:
         from tsp_mlx.inference import patch_attention_for_extraction, patch_rope_for_sparse_positions
         model, tokenizer = load(model_name)
@@ -188,11 +191,11 @@ def run_server():
         model._tsp_kv_manager = manager
         patch_attention_for_extraction(model)
         patch_rope_for_sparse_positions(model, manager.position_tracker)
-        print("\033[1;32m[SUCCESS] Model loaded and TSP Hook attached.\033[0m")
+        logger.info("Model loaded and TSP Hook attached.")
     except Exception as e:
-        print(f"\033[1;31m[ERROR] Failed to load model: {e}\033[0m")
+        logger.error(f"Failed to load model: {e}")
 
-    print("\033[1;36mStarting TSP Local API Server on http://127.0.0.1:8080\033[0m")
+    logger.info("Starting TSP Local API Server on http://127.0.0.1:8080")
     uvicorn.run(app, host="127.0.0.1", port=8080, log_level="info")
 
 if __name__ == "__main__":
