@@ -6,7 +6,15 @@
 
 namespace tsp {
 
-KVCacheManager::KVCacheManager(double threshold) : threshold_(threshold) {}
+KVCacheManager::KVCacheManager(double threshold, bool enable_compression, bool enable_consolidation, int head_dim) 
+    : threshold_(threshold), enable_compression_(enable_compression), enable_consolidation_(enable_consolidation) {
+    if (enable_compression_) {
+        compressor_ = std::make_unique<SubManifoldAutoencoder>(head_dim);
+    }
+    if (enable_consolidation_) {
+        consolidator_ = std::make_unique<MemoryConsolidator>();
+    }
+}
 
 KVCacheManager::Decision KVCacheManager::evaluate_attention(
     const mlx::core::array& attention_matrix,
@@ -120,27 +128,88 @@ std::vector<std::pair<mlx::core::array, mlx::core::array>> KVCacheManager::updat
     auto decision = evaluate_attention(attention_matrix, sinks);
     
     if (decision.action == "GARBAGE_COLLECT" && !decision.island_indices.empty()) {
-        std::cout << "[TSP] 🧹 GARBAGE COLLECT: Evicting " << decision.island_indices.size() << " tokens from KV Cache\n";
-        
         std::set<int> island_set(decision.island_indices.begin(), decision.island_indices.end());
         const auto& position_ids = tracker_.get_position_ids();
+        
+        std::vector<int> island_physical_indices;
         std::vector<int> keep_indices;
+        
         for (int i = 0; i < (int)position_ids.size(); ++i) {
             if (island_set.count(position_ids[i]) == 0) {
                 keep_indices.push_back(i);
+            } else {
+                island_physical_indices.push_back(i);
             }
         }
-
-        auto keep_array = mlx::core::array(keep_indices.data(), {static_cast<int>(keep_indices.size())}, mlx::core::int32);
         
-        std::vector<std::pair<mlx::core::array, mlx::core::array>> pruned_caches;
-        for (const auto& cache : kv_caches) {
-            auto pk = mlx::core::take(cache.first, keep_array, 2);
-            auto pv = mlx::core::take(cache.second, keep_array, 2);
-            pruned_caches.push_back({pk, pv});
+        if (island_physical_indices.empty()) {
+            return kv_caches;
+        }
+
+        // --- V4 Memory Consolidation (Test-Time Training) ---
+        if (enable_consolidation_ && consolidator_) {
+            float salience = consolidator_->evaluate_salience(attention_matrix, island_physical_indices);
+            if (salience > 0.5f) { // High Salience Threshold
+                auto island_array = mlx::core::array(island_physical_indices.data(), {static_cast<int>(island_physical_indices.size())}, mlx::core::int32);
+                auto k_island = mlx::core::take(kv_caches[0].first, island_array, 2);
+                auto v_island = mlx::core::take(kv_caches[0].second, island_array, 2);
+                
+                consolidator_->consolidate(k_island, v_island);
+            }
         }
         
-        tracker_.prune(decision.island_indices);
+        std::vector<std::pair<mlx::core::array, mlx::core::array>> pruned_caches;
+
+        if (enable_compression_ && compressor_ && island_physical_indices.size() > 1) {
+            std::cout << "[TSP] \U0001F5DC COMPRESSION: Compressing " << island_physical_indices.size() << " tokens into 1 Macro-Token\n";
+            
+            int macro_index = island_physical_indices.back();
+            keep_indices.push_back(macro_index);
+            std::sort(keep_indices.begin(), keep_indices.end());
+            
+            int macro_pos_id = position_ids[macro_index];
+            
+            auto island_array = mlx::core::array(island_physical_indices.data(), {static_cast<int>(island_physical_indices.size())}, mlx::core::int32);
+            auto keep_array = mlx::core::array(keep_indices.data(), {static_cast<int>(keep_indices.size())}, mlx::core::int32);
+            
+            for (const auto& cache : kv_caches) {
+                auto k_island = mlx::core::take(cache.first, island_array, 2);
+                auto v_island = mlx::core::take(cache.second, island_array, 2);
+                
+                auto k_macro = (*compressor_)(k_island);
+                auto v_macro = (*compressor_)(v_island);
+                
+                auto new_k = mlx::core::take(cache.first, keep_array, 2);
+                auto new_v = mlx::core::take(cache.second, keep_array, 2);
+                
+                auto it = std::find(keep_indices.begin(), keep_indices.end(), macro_index);
+                int new_macro_physical_idx = std::distance(keep_indices.begin(), it);
+                
+                // mlx::core::slice_update could be used, but since we lack a direct scatter equivalent for just replacing a slice
+                // easily in C++ without knowing the full bounds reliably for concatenation, we will concatenate:
+                // For simplicity in C++, we use concatenate: [before_macro, macro, after_macro]
+                auto k_before = mlx::core::slice(new_k, {0, 0, 0, 0}, {new_k.shape(0), new_k.shape(1), new_macro_physical_idx, new_k.shape(3)});
+                auto k_after  = mlx::core::slice(new_k, {0, 0, new_macro_physical_idx + 1, 0}, {new_k.shape(0), new_k.shape(1), new_k.shape(2), new_k.shape(3)});
+                auto final_k  = mlx::core::concatenate({k_before, k_macro, k_after}, 2);
+                
+                auto v_before = mlx::core::slice(new_v, {0, 0, 0, 0}, {new_v.shape(0), new_v.shape(1), new_macro_physical_idx, new_v.shape(3)});
+                auto v_after  = mlx::core::slice(new_v, {0, 0, new_macro_physical_idx + 1, 0}, {new_v.shape(0), new_v.shape(1), new_v.shape(2), new_v.shape(3)});
+                auto final_v  = mlx::core::concatenate({v_before, v_macro, v_after}, 2);
+                
+                pruned_caches.push_back({final_k, final_v});
+            }
+            tracker_.prune(decision.island_indices, macro_pos_id);
+        } else {
+            std::cout << "[TSP] \U0001F9F9 GARBAGE COLLECT: Evicting " << decision.island_indices.size() << " tokens from KV Cache\n";
+            
+            auto keep_array = mlx::core::array(keep_indices.data(), {static_cast<int>(keep_indices.size())}, mlx::core::int32);
+            for (const auto& cache : kv_caches) {
+                auto pk = mlx::core::take(cache.first, keep_array, 2);
+                auto pv = mlx::core::take(cache.second, keep_array, 2);
+                pruned_caches.push_back({pk, pv});
+            }
+            tracker_.prune(decision.island_indices);
+        }
         
         // Prune edges
         for (auto it = edges_.begin(); it != edges_.end(); ) {

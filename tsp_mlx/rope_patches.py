@@ -8,12 +8,20 @@ def patch_rope_for_sparse_positions(model: nn.Module, tracker: SparsePositionTra
     Monkey-patches the RoPE layers to use our SparsePositionTracker instead of MLX's
     default contiguous `offset + arange` logic. Automatically detects traditional/neox style and freq scaling.
     """
-    if not hasattr(model, 'model') or not hasattr(model.model, 'layers'):
+    from .inference import find_layers
+    layers = find_layers(model)
+    if layers is None:
+        print("[TSP] Warning: Could not find transformer layers for RoPE patching.")
         return
 
-    for layer in model.model.layers:
-        attention = layer.self_attn
-        if hasattr(attention, 'rope'):
+    for layer in layers:
+        attention = None
+        for attr in ["self_attn", "attn", "attention"]:
+            if hasattr(layer, attr):
+                attention = getattr(layer, attr)
+                break
+                
+        if attention is not None and hasattr(attention, 'rope'):
             rope_layer = attention.rope
             rope_cls = rope_layer.__class__
             
@@ -21,8 +29,17 @@ def patch_rope_for_sparse_positions(model: nn.Module, tracker: SparsePositionTra
                 def __call__(self, x, offset):
                     seq_len = x.shape[2]
                     
-                    true_positions = tracker.get_positions()[-seq_len:]
-                    positions = mx.array(true_positions, dtype=x.dtype)
+                    if hasattr(model, "_tsp_kv_manager") and model._tsp_kv_manager is not None:
+                        current_tracker = model._tsp_kv_manager.position_tracker
+                    else:
+                        current_tracker = tracker
+                        
+                    all_positions = current_tracker.get_positions()
+                    if all_positions.shape[0] < seq_len:
+                        positions = mx.arange(offset, offset + seq_len, dtype=x.dtype)
+                    else:
+                        true_positions = all_positions[-seq_len:]
+                        positions = mx.array(true_positions, dtype=x.dtype)
                     
                     scale = getattr(self, "scale", 1.0)
                     scaled_positions = positions.astype(mx.float32) * scale
@@ -37,8 +54,9 @@ def patch_rope_for_sparse_positions(model: nn.Module, tracker: SparsePositionTra
                     else:
                         raise ValueError("RoPE layer must have base or _freqs")
                     
-                    costheta = mx.cos(theta)
-                    sintheta = mx.sin(theta)
+                    # 🛑 CRITICAL FIX: CAST BACK TO HIDDEN STATE DTYPE
+                    costheta = mx.cos(theta).astype(x.dtype)
+                    sintheta = mx.sin(theta).astype(x.dtype)
                     
                     for _ in range(x.ndim - 2):
                         costheta = mx.expand_dims(costheta, 0)

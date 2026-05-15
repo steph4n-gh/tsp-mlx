@@ -1,0 +1,5 @@
+/Volumes/Storage/bigworkspace/tsp-mlx/cpp/src/CMakeFiles/tsp_core.dir
+/Volumes/Storage/bigworkspace/tsp-mlx/cpp/src/CMakeFiles/tsp_inference.dir
+/Volumes/Storage/bigworkspace/tsp-mlx/cpp/src/CMakeFiles/tsp_demo.dir
+/Volumes/Storage/bigworkspace/tsp-mlx/cpp/src/CMakeFiles/edit_cache.dir
+/Volumes/Storage/bigworkspace/tsp-mlx/cpp/src/CMakeFiles/rebuild_cache.dir
