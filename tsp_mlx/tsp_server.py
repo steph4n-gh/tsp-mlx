@@ -118,43 +118,21 @@ async def chat_completions(req: ChatRequest):
     
     seq_len = input_ids.shape[1]
     
-    # 🛑 CRITICAL FIX: SCOPE MANAGER TO THE REQUEST
-    # We must instantiate a new tracker inside the chat_completions endpoint for each request
-    # so concurrent requests do not cross-contaminate the position_tracker arrays.
+    from tsp_mlx.generate import generate_with_tsp
+    
+    # We still need head_dim for setup
     from mlx_lm.models.cache import make_prompt_cache
     dummy_cache = make_prompt_cache(model)
-    dummy_logits = model(mx.array([[0]]), cache=dummy_cache)
     head_dim = dummy_cache[0].keys.shape[-1]
-    
-    # Evaluate and aggressively clear dummy run
-    mx.eval(dummy_logits)
-    for c in dummy_cache:
-        c.keys = None
-        c.values = None
-    del dummy_logits, dummy_cache
-    
-    hook = CortexHook(eval_interval=10, threshold=0.9)
-    local_manager = KVCacheManager(hook, model=model, enable_compression=True, enable_consolidation=True, head_dim=head_dim)
-    local_manager.untrusted_indices = untrusted_indices
-    local_manager.consolidator.salience_threshold = 0.0 
-    model._tsp_kv_manager = local_manager
-    
-    # 🛑 CRITICAL: Force synchronization and evaluation in the request thread 
-    # before offloading to the StreamingResponse background thread.
-    mx.synchronize()
-    mx.eval(model.parameters())
+    for c in dummy_cache: c.keys = None; c.values = None
+    del dummy_cache
 
-    generator = generate_infinite_context(model, input_ids, max_tokens=req.max_tokens, kv_manager=local_manager)
-    
+    generator = generate_with_tsp(model, tokenizer, prompt, max_tokens=req.max_tokens, head_dim=head_dim, untrusted_indices=untrusted_indices)
+
     async def stream_tokens():
-        nonlocal generator, local_manager
+        nonlocal generator
         try:
-            async for token, stats in generator:
-                token_id = token.item()
-                if token_id == tokenizer.eos_token_id:
-                    break
-                text = tokenizer.decode([token_id])
-                
+            async for text, stats in generator:
                 safe_stats = {
                     "active_positions_count": len(stats.get("active_positions", [])),
                     "total_evicted": stats.get("total_evicted", 0),
@@ -168,26 +146,15 @@ async def chat_completions(req: ChatRequest):
                 yield f"data: {json.dumps(data)}\n\n"
             yield "data: [DONE]\n\n"
         finally:
-            if hasattr(model, "_tsp_kv_manager"):
-                if model._tsp_kv_manager:
-                    model._tsp_kv_manager.last_attention_matrix = None
-                    model._tsp_kv_manager.last_hidden_states = None
-                model._tsp_kv_manager = None
             generator = None
-            local_manager = None
-            import gc
-            mx.clear_cache()
-            gc.collect()
 
     if req.stream:
         return StreamingResponse(stream_tokens(), media_type="text/event-stream")
     else:
         try:
             response_text = ""
-            async for token, stats in generator:
-                if token.item() == tokenizer.eos_token_id:
-                    break
-                response_text += tokenizer.decode([token.item()])
+            async for text, stats in generator:
+                response_text += text
             return {
                 "id": "chatcmpl-tsp",
                 "object": "chat.completion",
@@ -197,16 +164,7 @@ async def chat_completions(req: ChatRequest):
                 "usage": {"prompt_tokens": len(input_ids[0]), "completion_tokens": len(tokenizer.encode(response_text)), "total_tokens": len(input_ids[0]) + len(tokenizer.encode(response_text))}
             }
         finally:
-            if hasattr(model, "_tsp_kv_manager"):
-                if model._tsp_kv_manager:
-                    model._tsp_kv_manager.last_attention_matrix = None
-                    model._tsp_kv_manager.last_hidden_states = None
-                model._tsp_kv_manager = None
             generator = None
-            local_manager = None
-            import gc
-            mx.clear_cache()
-            gc.collect()
 
 def run_server():
     global model, tokenizer
