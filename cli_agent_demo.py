@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import mlx.core as mx
 from mlx_lm import load
@@ -42,7 +43,7 @@ def print_dashboard(total_gen, active_ids, evicted, lambda2, step_name, action_l
     print("\033[1;30m-------------------------------------------------------------\033[0m")
     print("\n\033[1;37mTERMINAL STDOUT:\033[0m")
 
-def main():
+async def main():
     print("Loading model (Qwen2.5-Coder-7B-Instruct)...")
     try:
         model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
@@ -52,9 +53,9 @@ def main():
 
     # Setup aggressive pruning manager for the demo
     hook = CortexHook(eval_interval=5, threshold=0.99)
-    manager = KVCacheManager(hook, model=model, enable_compression=True, enable_consolidation=True)
-    manager.consolidator.salience_threshold = 0.0 # Force TTT for demo
-    model.tsp_kv_manager = manager
+    manager = KVCacheManager(hook, model=model, enable_compression=True, enable_consolidation=True, head_dim=128)
+    manager.consolidator.salience_threshold = 0.0
+    model._tsp_kv_manager = manager
 
     chat_history = [
         {"role": "system", "content": "You are Gemini CLI, an autonomous terminal agent. You run commands and write code."}
@@ -115,7 +116,7 @@ def main():
         print_dashboard(total_gen, manager.position_tracker.position_ids, 0, 0.0, step["phase"])
         print(f"{step['input']}\n")
         
-        for token, stats in generator:
+        async for token, stats in generator:
             token_id = token.item()
             if token_id == tokenizer.eos_token_id:
                 break
@@ -139,4 +140,4 @@ def main():
     print("\n\n[TSP] CLI Agent Demo Complete.")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -128,7 +128,7 @@ def tsp_patched_load(path_or_hf_repo: str, *args, **kwargs):
     
     hook = CortexHook(eval_interval=10, threshold=0.1)
     manager = KVCacheManager(hook, model=model, enable_compression=True, enable_consolidation=True)
-    model.tsp_kv_manager = manager
+    model._tsp_kv_manager = manager
     
     print("[\u03C4-Gate] Model successfully patched.")
     return model, tokenizer

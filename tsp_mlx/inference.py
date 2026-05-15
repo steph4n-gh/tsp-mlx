@@ -110,11 +110,15 @@ async def generate_infinite_context(
     Yields (token, stats_dict) for instrumentation.
     """
     import asyncio
+    from mlx_lm.models.cache import make_prompt_cache
+    kv_caches = make_prompt_cache(model)
+    head_dim = kv_caches[0].keys.shape[-1] if kv_caches and kv_caches[0].keys is not None else 64
+
     if kv_manager is None:
         if not hasattr(model, '_tsp_kv_manager'):
             # Use the default library path search logic in CortexHook
             hook = CortexHook(eval_interval=16, threat_threshold=999999.0)
-            kv_manager = KVCacheManager(hook, model=model)
+            kv_manager = KVCacheManager(hook, model=model, head_dim=head_dim)
             model._tsp_kv_manager = kv_manager
     
             patch_rope_for_sparse_positions(model, kv_manager.position_tracker)
@@ -124,10 +128,7 @@ async def generate_infinite_context(
             kv_manager.position_tracker.position_ids = []
             kv_manager.position_tracker.current_pos = 0
             kv_manager.cortex_hook.edges = set()
-
-    from mlx_lm.models.cache import make_prompt_cache
-    kv_caches = make_prompt_cache(model)
-    
+            
     y = prompt
     total_evicted = 0
     lambda_2 = 0.0

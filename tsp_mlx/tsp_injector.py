@@ -30,7 +30,7 @@ def patch_and_run(target_module_name: str, target_function: str):
         print("\033[1;36m[\u03C4-Gate] Attaching Neuro-Symbolic Paging Manager to model...\033[0m")
         hook = CortexHook(eval_interval=10, threshold=0.1)
         manager = KVCacheManager(hook, model=model, enable_compression=True, enable_consolidation=True)
-        model.tsp_kv_manager = manager
+        model._tsp_kv_manager = manager
         
         print("\033[1;32m[\u03C4-Gate] Model successfully patched. Returning control to host application.\033[0m")
         return model, tokenizer
