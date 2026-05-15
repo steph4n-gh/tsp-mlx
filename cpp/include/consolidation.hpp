@@ -7,17 +7,21 @@ namespace tsp {
 
 class MemoryConsolidator {
 public:
-    MemoryConsolidator(float learning_rate = 1e-4, float salience_threshold = 0.5f);
+    MemoryConsolidator(float learning_rate = 0.01f, float salience_threshold = 0.5f, int hidden_dim = 64);
     
     // Evaluates the internal density (salience) of the island
     float evaluate_salience(const mlx::core::array& attention_matrix, const std::vector<int>& island_physical_indices);
     
-    // Simulates a low-rank backward pass to bake knowledge into persistent weights
+    // Executes a real backward pass to bake knowledge into persistent weights
     void consolidate(const mlx::core::array& k_island, const mlx::core::array& v_island);
 
 private:
     float learning_rate_;
     float salience_threshold_;
+    
+    // LoRA weights for Value Projection TTT
+    mlx::core::array lora_a_;
+    mlx::core::array lora_b_;
 };
 
 } // namespace tsp

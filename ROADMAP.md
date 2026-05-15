@@ -13,16 +13,19 @@ The goal of the `tsp-mlx` framework is to enable "Infinite Context" (Persistent 
 *   **The Problem:** High-level wrappers assume a contiguous text stream (`offset + arange`). Deleting tokens mid-generation causes severe spatial hallucinations.
 *   **The Resolution:** The C++ Core (and the Python wrapper) now implement a Universal RoPE Patcher that intercepts the attention extraction *before* the dot product, applying rotation using the explicit, fragmented `position_ids` array from the `SparsePositionTracker`.
 
-### 3. Space Complexity & Graph Memory
-*   **The Problem:** Storing massive edge lists in Python `List` objects caused O(N^2) memory leaks.
-*   **The Resolution:** Migrated graph tracking to C++ `std::set` (and Python `set` comprehensions), completely eliminating duplicate edge accumulation and GPU VRAM spikes.
+### 3. Test-Time Training (TTT) Logic (Resolved)
+*   **The Problem:** The initial TTT implementation utilized a simplified proxy task, incorrectly mapping keys directly to values rather than capturing the actual projection from hidden states.
+*   **The Resolution:** The consolidation engine was overhauled to use the real hidden states (`x`) for context distillation. The model now performs mathematically rigorous LoRA updates on value projections, successfully 'memorizing' evicted context.
 
 ---
 
 ## Next Steps for v2.0 (The Foundation)
 
 1.  **Multi-Model Verification:** Prove the universal RoPE patcher works across varied architectures (e.g., Llama-3, Mistral) alongside the existing Qwen2.5 integration.
-2.  **Native C++ Bindings (PyBind11) [CRITICAL BLOCKER]:** *The "No BS" Reality Check:* Currently, the Python LLM implementations (`demo_chat.py` and `scripted_chat.py`) use a backported Python tracking loop. The advanced V3 (Compression) and V4 (Consolidation) features are scaffolded natively in the `cpp/` directory to guarantee performance, meaning they are fundamentally disconnected from the Python `mlx-lm` ecosystem right now. The absolute highest priority is using `pybind11` to expose the hardened `tsp::KVCacheManager` C++ class directly to Python. Until this is done, V3 and V4 cannot be used in live chat interfaces.
+2.  **Architecture Split (The MLX Graph Barrier):** *Architectural Decision:* We evaluated using `nanobind` to expose the C++ `KVCacheManager` directly to Python. However, we identified a hard Application Binary Interface (ABI) boundary: passing an `mlx::core::array` across the language boundary via memory buffers forces immediate tensor materialization. This breaks the lazy-evaluation computation graph, which is an absolute requirement for computing LoRA gradients during Test-Time Training. 
+    *   **Resolution:** The architecture has been decoupled into two distinct, optimized stacks. 
+    *   **Python Stack:** Utilizes the hardened Python `KVCacheManager` which orchestrates graph execution natively within MLX Python, while offloading the intensive Fiedler vector graph bisection to the Rust engine (`tau-gate`) via a zero-latency C-FFI (`ctypes`) bridge. This serves as the standard integration path for `mlx-lm`.
+    *   **C++ Stack:** The C++ `KVCacheManager` is fully implemented with native gradients and is reserved exclusively for high-performance, pure C++ inference pipelines.
 
 ---
 

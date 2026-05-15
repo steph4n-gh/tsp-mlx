@@ -39,9 +39,9 @@ def print_dashboard(total_gen, active_ids, evicted, lambda2, turn, total_turns):
     print("\n\033[1;37mLLM OUTPUT:\033[0m")
 
 def main():
-    print("Loading model (Llama-3.2-1B-Instruct)...")
+    print("Loading model (Qwen2.5-0.5B-Instruct)...")
     try:
-        model, tokenizer = load("mlx-community/Llama-3.2-1B-Instruct-4bit")
+        model, tokenizer = load("mlx-community/Qwen2.5-0.5B-Instruct-4bit")
     except Exception as e:
         print(f"Failed to load model. Error: {e}")
         return

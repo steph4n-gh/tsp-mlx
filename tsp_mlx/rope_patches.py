@@ -8,12 +8,20 @@ def patch_rope_for_sparse_positions(model: nn.Module, tracker: SparsePositionTra
     Monkey-patches the RoPE layers to use our SparsePositionTracker instead of MLX's
     default contiguous `offset + arange` logic. Automatically detects traditional/neox style and freq scaling.
     """
-    if not hasattr(model, 'model') or not hasattr(model.model, 'layers'):
+    from .inference import find_layers
+    layers = find_layers(model)
+    if layers is None:
+        print("[TSP] Warning: Could not find transformer layers for RoPE patching.")
         return
 
-    for layer in model.model.layers:
-        attention = layer.self_attn
-        if hasattr(attention, 'rope'):
+    for layer in layers:
+        attention = None
+        for attr in ["self_attn", "attn", "attention"]:
+            if hasattr(layer, attr):
+                attention = getattr(layer, attr)
+                break
+                
+        if attention is not None and hasattr(attention, 'rope'):
             rope_layer = attention.rope
             rope_cls = rope_layer.__class__
             

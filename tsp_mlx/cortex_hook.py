@@ -1,48 +1,64 @@
-import json
-import subprocess
 import os
 import mlx.core as mx
 from typing import Dict, Any, List
-import urllib.request
-import numpy as np
+import ctypes
+
+class FFIPartitionResult(ctypes.Structure):
+    _fields_ = [
+        ("nodes", ctypes.POINTER(ctypes.c_char_p)),
+        ("nodes_count", ctypes.c_size_t),
+        ("tau", ctypes.c_double),
+        ("connectivity_score", ctypes.c_double),
+    ]
 
 class CortexHook:
-    def __init__(self, daemon_path: str = None, eval_interval: int = 64, threshold: float = 0.015, threat_threshold: float = 999.0):
-        if daemon_path is None:
-            cache_dir = os.path.expanduser("~/.cache/tsp-mlx")
-            os.makedirs(cache_dir, exist_ok=True)
-            daemon_path = os.path.join(cache_dir, "tau-gate")
+    def __init__(self, lib_path: str = None, eval_interval: int = 64, threshold: float = 0.015, threat_threshold: float = 999.0, max_context_budget: int = 4096):
+        if lib_path is None:
+            # Try to find the shared library in the supplychain target directory
+            base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../supplychain/target/release"))
+            lib_path = os.path.join(base_dir, "libtau_gate.dylib")
             
-        self.daemon_path = daemon_path
+        if not os.path.exists(lib_path):
+            raise RuntimeError(f"tau-gate shared library not found at {lib_path}. Run 'cargo build --release' in supplychain/")
+
+        self.lib = ctypes.CDLL(lib_path)
+        
+        self.lib.tau_gate_analyze.argtypes = [
+            ctypes.POINTER(ctypes.c_int), ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_char_p), ctypes.c_size_t
+        ]
+        self.lib.tau_gate_analyze.restype = ctypes.POINTER(FFIPartitionResult)
+        
+        self.lib.tau_gate_free_result.argtypes = [ctypes.POINTER(FFIPartitionResult)]
+        self.lib.tau_gate_free_result.restype = None
+
         self.base_interval = eval_interval
         self.current_interval = eval_interval
         self.min_interval = max(4, eval_interval // 4)
         self.max_interval = eval_interval * 4
+        self.base_threshold = threshold
         self.threshold = threshold
+        self.max_context_budget = max_context_budget
         self.threat_threshold = threat_threshold
         self.token_counter = 0
         self.edges = set()
         self.last_lambda_2 = 0.0
         self.lambda_2_history = []
-        
-        self._ensure_daemon_exists()
-        
-        self.daemon = subprocess.Popen(
-            [self.daemon_path, "daemon"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            text=True
-        )
-
-    def _ensure_daemon_exists(self):
-        if not os.path.exists(self.daemon_path):
-            print(f"[TSP] Downloading mathematical daemon to {self.daemon_path}...")
-            subprocess.run(["curl", "-L", "-o", self.daemon_path, "https://github.com/steph4n-gh/tau-gate/releases/latest/download/tau-gate-darwin-arm64"])
-            os.chmod(self.daemon_path, 0o755)
 
     def evaluate_attention(self, attention_matrix: mx.array, sinks: List[int], position_ids: List[int]) -> Dict[str, Any]:
         self.token_counter += 1
         
+        # --- VRAM Auto-Tuning ---
+        # If the context is getting too large, we dynamically increase the threshold.
+        # This makes the graph harder to connect, forcing fragmentation and eviction.
+        current_len = len(position_ids)
+        if current_len > self.max_context_budget * 0.5:
+            # Linear scaling from base_threshold to 0.99 as it approaches 100% budget
+            pressure = (current_len - (self.max_context_budget * 0.5)) / (self.max_context_budget * 0.5)
+            self.threshold = self.base_threshold + (0.99 - self.base_threshold) * min(1.0, pressure)
+        else:
+            self.threshold = self.base_threshold
+            
         # Collapse heads
         a_2d = mx.mean(attention_matrix, axis=1)[0]
         if len(a_2d.shape) == 2 and a_2d.shape[0] == 1:
@@ -50,68 +66,98 @@ class CortexHook:
         else:
             a_sq = a_2d # Shape: [S, S] for prefill
         
+        import numpy as np
         if len(a_sq.shape) == 2:
-            # Prefill phase [L, L]
-            a_sym = mx.maximum(a_sq, a_sq.T)
-            thresholded = a_sym > self.threshold
-            mx.eval(thresholded)
-            indices = np.argwhere(np.array(thresholded)).tolist()
-            
-            for u_rel, v_rel in indices:
-                if u_rel != v_rel and u_rel < len(position_ids) and v_rel < len(position_ids):
-                    self.edges.add((position_ids[u_rel], position_ids[v_rel]))
+            # Prefill or Incremental Prefill phase [L_new, L_total]
+            L_new, L_total = a_sq.shape
+            if L_new == L_total:
+                a_sym = mx.maximum(a_sq, a_sq.T)
+                thresholded = a_sym > self.threshold
+                if mx.any(thresholded):
+                    indices = np.argwhere(np.array(thresholded)).tolist()
+                    for u_rel, v_rel in indices:
+                        if u_rel != v_rel and u_rel < len(position_ids) and v_rel < len(position_ids):
+                            self.edges.add((position_ids[u_rel], position_ids[v_rel]))
+            else:
+                # Incremental prefill: a_sq is [L_new, L_total]
+                thresholded = a_sq > self.threshold
+                if mx.any(thresholded):
+                    indices = np.argwhere(np.array(thresholded)).tolist()
+                    for u_new, v_rel in indices:
+                        if v_rel < L_total:
+                            # The absolute position of the query
+                            # position_ids represents the full context, so the last L_new elements are the queries
+                            u_abs = position_ids[-L_new + u_new]
+                            v_abs = position_ids[v_rel]
+                            if u_abs != v_abs:
+                                self.edges.add((u_abs, v_abs))
+                                self.edges.add((v_abs, u_abs))
         else:
-            # Decode phase [L]
+            # Decode phase [L_total]
             thresholded = a_sq > self.threshold
-            mx.eval(thresholded)
-            indices = np.argwhere(np.array(thresholded)).tolist()
-            
-            source_abs = position_ids[-1]
-            for target_rel in indices:
-                if target_rel[0] >= len(position_ids): continue
-                target_abs = position_ids[target_rel[0]]
-                if source_abs != target_abs:
-                    self.edges.add((source_abs, target_abs))
-                    self.edges.add((target_abs, source_abs))
+            if mx.any(thresholded):
+                indices = np.argwhere(np.array(thresholded)).tolist()
+                
+                source_abs = position_ids[-1]
+                for target_rel_list in indices:
+                    target_rel = target_rel_list[0]
+                    if target_rel >= len(position_ids): continue
+                    target_abs = position_ids[target_rel]
+                    if source_abs != target_abs:
+                        self.edges.add((source_abs, target_abs))
+                        self.edges.add((target_abs, source_abs))
                     
-        if self.token_counter % self.current_interval != 0:
+        over_budget = len(position_ids) > getattr(self, "max_context_budget", 4096)
+        if self.token_counter % self.current_interval != 0 and not over_budget:
             return {"action": "ALLOW", "island_indices": []}
 
-        payload = {
-            "edges": list(self.edges),
-            "sinks": sinks,
-            "threat_threshold": self.threat_threshold
-        }
-
-        self.daemon.stdin.write(json.dumps(payload) + "\n")
-        self.daemon.stdin.flush()
-
-        response_line = self.daemon.stdout.readline()
-        if not response_line:
-            raise RuntimeError("CortexHook: Daemon connection lost.")
+        # --- FFI Call ---
+        flat_edges = []
+        for u, v in self.edges:
+            flat_edges.extend([u, v])
             
-        decision = json.loads(response_line)
-        current_l2 = decision.get("connectivity_score", 0.0)
+        edges_ptr = (ctypes.c_int * len(flat_edges))(*flat_edges)
         
-        # Adaptive Frequency Logic
-        self.lambda_2_history.append(current_l2)
-        if len(self.lambda_2_history) > 5:
-            self.lambda_2_history.pop(0)
+        node_names = [str(pid).encode('utf-8') for pid in position_ids]
+        nodes_ptr = (ctypes.c_char_p * len(node_names))(*node_names)
+        
+        result_ptr = self.lib.tau_gate_analyze(
+            edges_ptr, len(self.edges),
+            nodes_ptr, len(position_ids)
+        )
+        
+        decision = {"action": "ALLOW", "island_indices": []}
+        
+        if result_ptr:
+            res = result_ptr.contents
+            current_l2 = res.connectivity_score
+            self.last_lambda_2 = current_l2
             
-        if len(self.lambda_2_history) >= 2:
-            delta_l2 = abs(self.lambda_2_history[-1] - self.lambda_2_history[-2])
+            if current_l2 < 0.1:
+                decision["action"] = "GARBAGE_COLLECT"
+                sink_set = set(sinks)
+                for i in range(res.nodes_count):
+                    try:
+                        node_id = int(res.nodes[i].decode('utf-8'))
+                        if node_id not in sink_set:
+                            decision["island_indices"].append(node_id)
+                    except (ValueError, AttributeError):
+                        continue
             
-            # High volatility -> semantic shift -> check more frequently
-            if delta_l2 > 0.05:
-                self.current_interval = max(self.min_interval, self.current_interval // 2)
-            # Low volatility -> stable manifold -> check less frequently
-            elif delta_l2 < 0.001 and current_l2 > 0.1:
-                self.current_interval = min(self.max_interval, self.current_interval * 2)
+            self.lib.tau_gate_free_result(result_ptr)
+            
+            # Adaptive Frequency Logic
+            self.lambda_2_history.append(current_l2)
+            if len(self.lambda_2_history) > 5:
+                self.lambda_2_history.pop(0)
                 
-        self.last_lambda_2 = current_l2
-        decision["eval_interval"] = self.current_interval # Pass interval for instrumentation
+            if len(self.lambda_2_history) >= 2:
+                delta_l2 = abs(self.lambda_2_history[-1] - self.lambda_2_history[-2])
+                if delta_l2 > 0.05:
+                    self.current_interval = max(self.min_interval, self.current_interval // 2)
+                elif delta_l2 < 0.001 and current_l2 > 0.1:
+                    self.current_interval = min(self.max_interval, self.current_interval * 2)
+        
+        decision["eval_interval"] = self.current_interval
         return decision
 
-    def __del__(self):
-        if hasattr(self, "daemon") and self.daemon.poll() is None:
-            self.daemon.terminate()

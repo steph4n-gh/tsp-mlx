@@ -15,15 +15,32 @@ TSP manages Large Language Model (LLM) KV caches by using spectral graph theory 
 
 ---
 
-## Architecture & Dependencies
+## Dual-Stack Architecture & Dependencies
 
-TSP is built as a C++ library that integrates with the MLX framework.
+TSP utilizes a dual-stack architecture to ensure maximum performance and compatibility across different integration environments. The system avoids serialization overhead and computation graph breaks by operating directly within the target execution environment.
 
 **Core Dependency: $\tau$-Gate**
-TSP is fundamentally dependent on [**$\tau$-Gate**](https://github.com/steph4n-gh/tau-gate), which serves as its mathematical core. 
-1.  **MLX C++ Integration:** Directly interfaces with the MLX C++ API to manage KV cache tensors.
-2.  **$\tau$-Gate Engine:** The `tau-gate` Rust static library is required to perform the spectral bisection on the attention graph.
-3.  **FFI Bridge:** C++ communicates with the Rust engine via C FFI to avoid inter-process communication overhead.
+Both stacks are fundamentally dependent on [**$\tau$-Gate**](https://github.com/steph4n-gh/tau-gate), a high-performance, zero-dependency Rust library that serves as the mathematical core for calculating spectral bisections on attention graphs.
+
+### 1. The Python Stack (`mlx-lm` Integration)
+Designed for seamless integration with the Python `mlx-lm` ecosystem.
+*   **Zero-Latency FFI:** Python utilizes `ctypes` to bridge directly to the compiled `tau-gate` Rust engine (`libtau_gate.dylib`), calculating Fiedler vectors without inter-process communication (IPC) overhead.
+*   **Graph Preservation:** Advanced features like Test-Time Training (TTT) and Topological Compression execute within the Python MLX computation graph. This preserves lazy evaluation and enables automatic differentiation for real-time model updates.
+
+### 2. The Native C++ Stack
+Designed for standalone, high-performance C++ inference engines using `mlx-cxx`.
+*   **Native Execution:** Implements the `KVCacheManager`, TTT gradients, and SubManifold Autoencoders natively in C++.
+*   **Static Linking:** Directly links against the compiled Rust library (`libtau_gate.a`) for native memory access and optimal topological analysis speed.
+
+## Architectural Philosophy: Why Not RAG? (Perfect Memory vs. Intuition)
+
+Users seeking absolute, verbatim recall ("perfect memory") could easily extend TSP by piping the evicted "Thought Islands" into a Vector Database for Retrieval-Augmented Generation (RAG). However, TSP deliberately omits RAG from its default architecture for several critical reasons:
+
+1.  **Zero-Dependency & Low Latency:** TSP is engineered to operate at the foundational matrix level. Introducing a Vector DB requires external dependencies, embedding models, and disk I/O, which violate TSP's core mandate as a lightweight, zero-latency VRAM manager.
+2.  **Intuition vs. Archival:** RAG acts as an external hard drive (L2 Cache), solving *data retrieval*. TSP focuses on the AI's *intuition and executive function*. Through Test-Time Training (TTT), TSP compresses concepts into the model's weights ("muscle memory"), prioritizing behavioral adaptation and style over verbatim text recall.
+3.  **Context Bloat:** RAG achieves recall by injecting old text back into the active prompt, inherently bloating the KV cache. TSP is designed to explicitly keep the KV cache mathematically lean.
+
+**Extending TSP:** Developers are encouraged to combine TSP with their own RAG pipelines for composite memory: use TSP to keep the active GPU context pure, let the `MemoryConsolidator` bake behavioral nuances into the model's weights (TTT), and route the evicted tokens to a database for permanent archival.
 
 ## Use Cases for Persistent Agents
 

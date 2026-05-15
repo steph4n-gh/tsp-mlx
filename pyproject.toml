@@ -4,15 +4,23 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tsp-mlx"
-version = "0.1.0"
+version = "1.0.0"
 description = "The τ-Spectral Pruner (TSP): A Neuro-Symbolic Paging Router for MLX LLMs."
 authors = [{ name = "steph4n-gh" }]
 license = { text = "MIT" }
 dependencies = [
     "mlx>=0.31.0",
     "mlx-lm>=0.31.0",
-    "numpy>=1.26.0"
+    "numpy>=1.26.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "pydantic>=2.7.0",
+    "datasets>=2.19.0"
 ]
 
 [project.urls]
 Homepage = "https://github.com/steph4n-gh/tsp-mlx"
+
+[project.scripts]
+tsp-server = "tsp_mlx.tsp_server:run_server"
+tsp-inject = "tsp_mlx.tsp_injector:cli_main"

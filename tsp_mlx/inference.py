@@ -40,7 +40,7 @@ def patch_attention_for_extraction(model: nn.Module):
         def __init__(self, orig, global_model):
             super().__init__()
             self.orig = orig
-            self.global_model = global_model
+            self._global_model = global_model
             for attr in dir(orig):
                 if not attr.startswith("__") and not callable(getattr(orig, attr)):
                     try:
@@ -94,7 +94,9 @@ def patch_attention_for_extraction(model: nn.Module):
                     scores = scores + causal_mask
 
                 attn_weights = mx.softmax(scores.astype(mx.float32), axis=-1).astype(scores.dtype)
-                self.global_model.last_attention_matrix = attn_weights 
+                if hasattr(self._global_model, '_tsp_kv_manager'):
+                    self._global_model._tsp_kv_manager.last_attention_matrix = attn_weights 
+                    self._global_model._tsp_kv_manager.last_hidden_states = x # Capture x for TTT
             
             return self.orig(x, mask=mask, cache=cache, **kwargs)
 
@@ -109,17 +111,16 @@ def generate_infinite_context(
     """
     Yields (token, stats_dict) for instrumentation.
     """
-    if not hasattr(model, 'tsp_kv_manager'):
-        import os
-        daemon_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../supplychain/target/release/tau-gate"))
-        hook = CortexHook(daemon_path=daemon_path, eval_interval=16, threat_threshold=999999.0)
-        kv_manager = KVCacheManager(hook)
-        model.tsp_kv_manager = kv_manager
+    if not hasattr(model, '_tsp_kv_manager'):
+        # Use the default library path search logic in CortexHook
+        hook = CortexHook(eval_interval=16, threat_threshold=999999.0)
+        kv_manager = KVCacheManager(hook, model=model)
+        model._tsp_kv_manager = kv_manager
 
         patch_rope_for_sparse_positions(model, kv_manager.position_tracker)
         patch_attention_for_extraction(model)
     else:
-        kv_manager = model.tsp_kv_manager
+        kv_manager = model._tsp_kv_manager
         kv_manager.position_tracker.position_ids = []
         kv_manager.position_tracker.current_pos = 0
         kv_manager.cortex_hook.edges = set()
@@ -137,13 +138,14 @@ def generate_infinite_context(
         logits = model(y, cache=kv_caches)
         y = mx.argmax(logits[:, -1, :], axis=-1, keepdims=True)
         
-        if hasattr(model, 'last_attention_matrix'):
-            attn_matrix = model.last_attention_matrix
+        if hasattr(kv_manager, 'last_attention_matrix'):
+            attn_matrix = kv_manager.last_attention_matrix
+            hidden_states = getattr(kv_manager, 'last_hidden_states', None)
             raw_caches = [(c.keys, c.values) for c in kv_caches]
             before_len = kv_manager.position_tracker.get_positions().shape[0]
             
             # Use sinks = [0,1,2,3,4] to protect system prompt
-            pruned_raw_caches = kv_manager.update(attn_matrix, raw_caches, sinks=[0, 1, 2, 3, 4])
+            pruned_raw_caches = kv_manager.update(attn_matrix, raw_caches, sinks=[0, 1, 2, 3, 4], x=hidden_states)
             
             after_len = kv_manager.position_tracker.get_positions().shape[0]
             total_evicted += (before_len - after_len)
@@ -156,6 +158,11 @@ def generate_infinite_context(
                     cache_obj.keys = pk
                     cache_obj.values = pv
                     cache_obj.offset = pk.shape[2] 
+            
+            # 🛑 CRITICAL: Clear the computation graph to prevent memory leaks
+            mx.eval(y, kv_caches, kv_manager.position_tracker.get_positions())
+        else:
+            mx.eval(y, kv_caches)
         
         stats = {
             "active_positions": kv_manager.position_tracker.position_ids.copy(),
