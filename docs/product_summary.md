@@ -5,7 +5,7 @@ This document serves as the official positioning statement for the $\tau$-Spectr
 ---
 
 ## 1. The One-Sentence Pitch (The Hook)
-TSP is a C++ memory manager that allows Large Language Models to run infinitely on constrained hardware by automatically throwing away irrelevant context while preserving core instructions.
+TSP is a Python memory manager backed by a Rust core that allows Large Language Models to run infinitely on constrained hardware by automatically throwing away irrelevant context while preserving core instructions.
 
 ---
 
@@ -24,13 +24,13 @@ Normally, when the backpack gets full, the student either has to stop taking the
 ---
 
 ## 4. For the Experts (The Technical Reality)
-TSP is a low-level, natively compiled C++ extension for the MLX framework, backed by a zero-dependency Rust mathematical solver (`tau-gate`) linked via a zero-latency C FFI bridge. 
+TSP is a Python framework built on MLX, backed by a zero-dependency Rust mathematical solver (`tau-gate`) linked via a zero-latency C FFI bridge. 
 
 **What it does:** 
-It intercepts the $O(N^2)$ attention mechanism of the LLM's final transformer layer *after* causal masking but *before* sequence decoding. It builds a directed graph of attention probabilities in C++ system memory (`std::set`). On a scheduled interval, the Rust engine performs an eigenvalue decomposition on the graph's Laplacian, isolating the Fiedler vector ($\lambda_2$) to identify the Maximum Spectral Gap. 
+It intercepts the $O(N^2)$ attention mechanism of the LLM's final transformer layer *after* causal masking but *before* sequence decoding. It builds a directed graph of attention probabilities in Python/Rust. On a scheduled interval, the Rust engine performs an eigenvalue decomposition on the graph's Laplacian, isolating the Fiedler vector ($\lambda_2$) to identify the Maximum Spectral Gap. 
 
 **The result:**
-Nodes (tokens) that fall into a disconnected semantic manifold are surgically evicted from the physical MLX KV Cache tensors in-place. A custom C++ Universal RoPE Patcher intercepts subsequent generation steps, applying Rotary Position Embeddings based on the fragmented absolute position IDs (rather than contiguous physical indices), completely eliminating spatial tearing and preventing the hallucination death-spiral associated with mid-sequence cache truncation.
+Nodes (tokens) that fall into a disconnected semantic manifold are surgically evicted from the physical MLX KV Cache tensors in-place. A custom Python Universal RoPE Patcher intercepts subsequent generation steps, applying Rotary Position Embeddings based on the fragmented absolute position IDs (rather than contiguous physical indices), completely eliminating spatial tearing and preventing the hallucination death-spiral associated with mid-sequence cache truncation.
 
 ---
 

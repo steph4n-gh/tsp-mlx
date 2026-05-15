@@ -1,7 +1,7 @@
 import os
 import mlx.core as mx
 
-class SVDCompressor:
+class VarianceCompressor:
     """
     A deterministic compressor that uses variance-weighted approximation
     to extract the principal semantic component of a KV cache 'Thought Island'.
@@ -39,11 +39,11 @@ class SVDCompressor:
 
 def load_pretrained_autoencoders(hidden_dim: int):
     """
-    Returns the deterministic SVD/Variance compressor.
+    Returns the deterministic Variance compressor.
     No weights are loaded from disk.
     """
-    print(f"[TSP] \U0001F5DC Using Deterministic SVD/Variance Compression (No training required).")
-    k_encoder = SVDCompressor(hidden_dim=hidden_dim)
-    v_encoder = SVDCompressor(hidden_dim=hidden_dim)
+    print(f"[TSP] \U0001F5DC Using Deterministic Variance Compression (No training required).")
+    k_encoder = VarianceCompressor(hidden_dim=hidden_dim)
+    v_encoder = VarianceCompressor(hidden_dim=hidden_dim)
     
     return k_encoder, v_encoder

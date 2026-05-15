@@ -1,6 +1,6 @@
 # τ-Spectral Pruner (TSP) for MLX
 
-**C++ KV Cache Manager for Apple Silicon using Spectral Graph Theory**
+**KV Cache Manager for MLX using Spectral Graph Theory**
 
 TSP manages Large Language Model (LLM) KV caches by using spectral graph theory to identify and evict isolated token clusters. It maintains a bounded VRAM footprint by keeping a topologically connected context.
 
@@ -15,22 +15,15 @@ TSP manages Large Language Model (LLM) KV caches by using spectral graph theory 
 
 ---
 
-## Dual-Stack Architecture & Dependencies
+## Architecture & Dependencies
 
-TSP utilizes a dual-stack architecture to ensure maximum performance and compatibility across different integration environments. The system avoids serialization overhead and computation graph breaks by operating directly within the target execution environment.
+TSP is designed for seamless integration with the Python `mlx-lm` ecosystem. It avoids serialization overhead and computation graph breaks by operating directly within the target execution environment.
 
 **Core Dependency: $\tau$-Gate**
-Both stacks are fundamentally dependent on [**$\tau$-Gate**](https://github.com/steph4n-gh/tau-gate), a high-performance, zero-dependency Rust library that serves as the mathematical core for calculating spectral bisections on attention graphs.
+The system is fundamentally dependent on [**$\tau$-Gate**](https://github.com/steph4n-gh/tau-gate), a high-performance, zero-dependency Rust library that serves as the mathematical core for calculating spectral bisections on attention graphs.
 
-### 1. The Python Stack (`mlx-lm` Integration)
-Designed for seamless integration with the Python `mlx-lm` ecosystem.
 *   **Zero-Latency FFI:** Python utilizes `ctypes` to bridge directly to the compiled `tau-gate` Rust engine (`libtau_gate.dylib`), calculating Fiedler vectors without inter-process communication (IPC) overhead.
-*   **Graph Preservation:** Advanced features like Test-Time Training (TTT) and Topological Compression execute within the Python MLX computation graph. This preserves lazy evaluation and enables automatic differentiation for real-time model updates.
-
-### 2. The Native C++ Stack
-Designed for standalone, high-performance C++ inference engines using `mlx-cxx`.
-*   **Native Execution:** Implements the `KVCacheManager`, TTT gradients, and SubManifold Autoencoders natively in C++.
-*   **Static Linking:** Directly links against the compiled Rust library (`libtau_gate.a`) for native memory access and optimal topological analysis speed.
+*   **Graph Preservation:** Features like Test-Time Training (TTT) and Variance Compression execute within the Python MLX computation graph. This preserves lazy evaluation and enables automatic differentiation for real-time model updates.
 
 ## Architectural Philosophy: Why Not RAG? (Perfect Memory vs. Intuition)
 

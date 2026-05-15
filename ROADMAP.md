@@ -29,26 +29,24 @@ The goal of the `tsp-mlx` framework is to enable "Infinite Context" (Persistent 
 
 ---
 
-## v3.0: Topological Compression (Macro-Tokens)
+## v3.0: Variance Compression (Macro-Tokens)
 
-Currently, TSP deletes isolated context. In v3.0, we will compress it. This provides an LLM with "Fractal Memory"—the ability to compress a 100,000-line codebase into 100 dense tokens without losing access to the underlying logic.
+Currently, TSP deletes isolated context. In v3.0, we compress it. This provides an LLM with the ability to compress a large context block into dense tokens without losing access to the underlying statistical variance.
 
 ### Implementation Plan:
-1.  **Boundary Detection (The Engine):** Utilize $\tau$-Gate's Fiedler Vector to identify the exact, mathematically perfect boundaries of a single, cohesive concept (a "Thought Island"). This solves the fatal flaw of arbitrary "chunking" algorithms.
-2.  **Sub-Manifold Autoencoder (The Core):** Implement a localized, ultra-fast neural network (a mini-transformer or deep MLP) using MLX to project sequences of KV cache tensors into a single token vector.
-3.  **Active Cache Synthesis:** When $\lambda_2$ drops (signaling a semantic shift), extract the 400-token Thought Island from the KV Cache. Pass it through the autoencoder to generate 1 dense **Macro-Token**.
-4.  **In-Place Matrix Stitching:** Replace the 400 raw tokens in the KV Cache tensors with the 1 Macro-Token.
-5.  **RoPE Realignment:** Update `SparsePositionTracker` so that the single Macro-Token inherits the spatial weight of the original 400 tokens, ensuring subsequent tokens rotate perfectly and spatial continuity is preserved.
+1.  **Boundary Detection (The Engine):** Utilize $\tau$-Gate's Fiedler Vector to identify the boundaries of a single, cohesive concept (a "Thought Island").
+2.  **Variance Compressor (The Core):** Implement a statistical compressor that computes the variance of hidden states within the island to generate a weighted average, projecting the island into a dense representation.
+3.  **Active Cache Synthesis:** When $\lambda_2$ drops, extract the Thought Island from the KV Cache. Pass it through the compressor to generate dense **Macro-Tokens**.
 
 ---
 
 ## v4.0: Memory Consolidation (Test-Time Training)
 
-Inspired by *Nested Learning* (Section 1.1: Human Brain Perspective), v4.0 will solve "Anterograde Amnesia" by transferring knowledge from short-term memory (KV Cache) to long-term memory (MLP Weights).
+v4.0 enables transferring knowledge from short-term memory (KV Cache) to long-term memory (LoRA Weights).
 
 ### Implementation Plan:
-1.  **Salience Trigger:** Modify $\tau$-Gate to not only detect isolated islands, but to score them based on "Salience" (the density of internal connections). 
-2.  **The Consolidation Hook:** If a highly salient island (e.g., the user teaching the AI a complex new API) shifts out of the active context, we do not just compress it. We trigger an "Online Consolidation" event.
-3.  **The M3 Optimizer (Multi-scale Momentum Muon):** Standard optimizers (like AdamW) cause catastrophic forgetting in continual learning. Following the *Nested Learning* paper (Section 7.2), we must implement the M3 Optimizer natively in MLX C++. This optimizer maintains long-context momentum, ensuring that baking new knowledge does not destroy old knowledge.
-4.  **Localized Backward Pass:** The MLX engine temporarily halts generation and runs a low-rank backward pass (using the M3 Optimizer) exclusively on the LLM's MLP blocks, using the Thought Island as the training data.
-5.  **Persistent Learning:** The knowledge is permanently baked into the model's weights. The KV Cache is instantly cleared, and the agent has permanently learned the new skill without requiring a massive, offline fine-tuning run.
+1.  **Salience Trigger:** Modify $\tau$-Gate to score isolated islands based on "Salience" (the density of internal connections). 
+2.  **The Consolidation Hook:** If a highly salient island shifts out of the active context, we trigger an "Online Consolidation" event.
+3.  **Dynamic Auto-Tuning:** The engine detects the quantization level of the base model to dynamically configure gradient clipping and learning rates.
+4.  **Localized Backward Pass:** The MLX engine temporarily halts generation and runs a few steps of a backward pass exclusively on injected `LoRALinear` value projections, using the Thought Island as the training data.
+5.  **Persistent Learning:** The updated LoRA adapters are serialized to disk (`tsp_adapters.safetensors`). When the API server restarts, it automatically loads these adapters, ensuring the agent retains its consolidated knowledge across sessions.

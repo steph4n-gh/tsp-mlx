@@ -9,7 +9,7 @@ TSP is not a wrapper around `mlx-lm.generate`. It is a low-level injection into 
 ### The Setup Phase
 1.  **Initialize the Manager:** You create a `KVCacheManager` connected to the `CortexHook` (the FFI bridge to the Rust math engine).
 2.  **Patch RoPE:** You must call `patch_rope_for_sparse_positions(model, tracker)`. Standard MLX models assume token 50 is physically at index 50. TSP breaks this assumption. The patch forces the model to look up the *true semantic position* of a token from the `SparsePositionTracker` before applying Rotary Position Embeddings.
-3.  **Patch Attention:** You call `patch_attention_for_extraction(model)`. This intercepts the `q_proj` and `k_proj` outputs in the final transformer layer, applies RoPE to them, calculates the Causal Mask and Softmax, and saves the normalized probabilities so the C++ engine can read them.
+3.  **Patch Attention:** You call `patch_attention_for_extraction(model)`. This intercepts the `q_proj` and `k_proj` outputs in the final transformer layer, applies RoPE to them, calculates the Causal Mask and Softmax, and saves the normalized probabilities so the Rust engine can read them.
 
 ### The Inference Loop
 During generation, instead of a standard step, you explicitly call the TSP update:
