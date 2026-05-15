@@ -7,7 +7,7 @@ Launch the **Immutable Agent** (TSP + $\tau$-Gate), proving that we have solved 
 The core architecture is fundamentally sound and mathematically verified:
 1. **Topological Compression:** The agent successfully ingests massive files (`ClaudeAdapter.ts` at 22k tokens) and organically compresses them into Macro-Tokens, dynamically dropping VRAM from 50k+ tokens back down to a safe ~2,000 tokens, completely preventing OOM.
 2. **Deep Recall (TTT):** Memory Consolidation works. When asked a specific question about an evicted file, the agent uses the continuous LoRA updates and Topological Unpack to recall the exact functions and answer flawlessly.
-3. **The Semantic Firewall:** The `mega_demo.py` successfully demonstrates authentic mid-generation interception. If the agent tries to type `npm install obscure-json-packer`, the $\tau$-Gate hypervisor kills the generation stream mid-sentence and forces the agent to pivot to a safe alternative.
+3. **The Semantic Firewall:** The `demos/mega_demo.py` successfully demonstrates authentic mid-generation interception. If the agent tries to type `npm install obscure-json-packer`, the $\tau$-Gate hypervisor kills the generation stream mid-sentence and forces the agent to pivot to a safe alternative.
 4. **The Launch Post:** The Hacker News launch article (`IMMUTABLE_AGENT_LAUNCH.md`) is finalized, mathematically defensible, and ready to publish alongside the demo videos.
 
 ## 🛑 The 4-Bit Prefill Paradox (Hardware Limit)
