@@ -43,6 +43,7 @@ class MemoryConsolidator:
             self._detect_dtype_and_tune(learning_rate)
             self._inject_lora()
             self.optimizer = optim.AdamW(learning_rate=self.learning_rate)
+            self.load_adapters() # Automatically load persistent memory on boot
 
     def _detect_dtype_and_tune(self, user_lr):
         """Dynamically tunes hyperparameters based on model quantization volatility."""

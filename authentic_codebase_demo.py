@@ -124,6 +124,9 @@ async def main():
         
         if prefill_ids.shape[1] > 0:
             chunk_size = 256
+            start_time = time.time()
+            processed_tokens = 0
+            
             for c_idx in range(0, prefill_ids.shape[1], chunk_size):
                 chunk = prefill_ids[:, c_idx:c_idx+chunk_size]
                 
@@ -146,13 +149,20 @@ async def main():
                 mx.eval([c.keys for c in persistent_cache if c.keys is not None])
                 
                 global_total_gen += chunk.shape[1]
+                processed_tokens += chunk.shape[1]
                 active_pos = manager.position_tracker.position_ids
                 evicted = global_total_gen - len(active_pos)
                 
-                action_log = f"\u23F3 Ingesting Chunk... ({min(c_idx+chunk_size, prefill_ids.shape[1])}/{prefill_ids.shape[1]} tokens)"
+                elapsed = time.time() - start_time
+                tok_sec = processed_tokens / elapsed if elapsed > 0 else 0
+                
+                action_log = f"\u23F3 Ingesting Chunk... ({min(c_idx+chunk_size, prefill_ids.shape[1])}/{prefill_ids.shape[1]} tokens) - {tok_sec:.0f} tok/s"
                 print_dashboard(global_total_gen, active_pos, evicted, 0.0, step["phase"], len(manager.topological_pages), action_log)
                 print(f"System: [Injecting massive source code chunk...]")
                 time.sleep(0.01) # Ultra-fast visual delay
+        
+        # Dial back evaluation frequency to 16 for auto-regressive generation to speed it up
+        manager.cortex_hook.current_interval = 16
         
         if step.get("skip_generation"):
             response = "File successfully loaded into context."

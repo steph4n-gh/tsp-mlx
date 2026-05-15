@@ -96,18 +96,16 @@ async def main():
         user_input = step["prompt"]
         chat_history.append({"role": "user", "content": user_input})
         
-        # Cleanly extract ONLY the new prompt string to encode
-        if len(chat_history) > 1:
-            previous_prompt = tokenizer.apply_chat_template(chat_history[:-1], tokenize=False, add_generation_prompt=False)
-            current_prompt = tokenizer.apply_chat_template(chat_history, tokenize=False, add_generation_prompt=True)
-            new_string = current_prompt[len(previous_prompt):]
-        else:
-            new_string = tokenizer.apply_chat_template(chat_history, tokenize=False, add_generation_prompt=True)
-            
-        new_input_ids = mx.array(tokenizer.encode(new_string))[None]
+        # Clean up before generation
+        prompt = tokenizer.apply_chat_template(chat_history, tokenize=False, add_generation_prompt=True)
+        full_input_ids = mx.array(tokenizer.encode(prompt))[None]
+        
+        # Array-level slicing ensures perfect token boundaries and avoids BOS token insertion
+        new_input_ids = full_input_ids[:, previous_token_length:]
         
         if hasattr(manager.cortex_hook, "edges"):
             manager.cortex_hook.edges.clear()
+            manager.cortex_hook.current_interval = 16
         
         generator = generate_infinite_context(
             model, 
@@ -178,10 +176,9 @@ async def main():
             
         if intercepted:
             # Task 3.2: Autonomous Pivot
-            previous_prompt = tokenizer.apply_chat_template(chat_history[:-1], tokenize=False, add_generation_prompt=False)
-            current_prompt = tokenizer.apply_chat_template(chat_history, tokenize=False, add_generation_prompt=True)
-            new_string = current_prompt[len(previous_prompt):]
-            new_input_ids = mx.array(tokenizer.encode(new_string))[None]
+            prompt = tokenizer.apply_chat_template(chat_history, tokenize=False, add_generation_prompt=True)
+            full_input_ids = mx.array(tokenizer.encode(prompt))[None]
+            new_input_ids = full_input_ids[:, previous_token_length:]
             
             if hasattr(manager.cortex_hook, "edges"):
                 manager.cortex_hook.edges.clear()
