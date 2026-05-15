@@ -5,8 +5,6 @@ from mlx_lm import load
 from tsp_mlx.generate import setup_tsp
 from tsp_mlx.inference import generate_infinite_context
 import time
-import subprocess
-import os
 
 def clear_screen():
     print("\033[2J\033[H", end="")
@@ -56,12 +54,11 @@ async def main():
         return
 
     # 1. Setup TSP with a constrained budget so evictions happen quickly during the demo
-    # Setting max_context_budget=350 ensures we see pruning action in the first 2 minutes.
     manager = setup_tsp(model, head_dim=128, enable_compression=True, enable_consolidation=True)
     manager.cortex_hook.base_interval = 5
     manager.cortex_hook.threshold = 0.05
     manager.cortex_hook.max_context_budget = 350 
-    manager.consolidator.salience_threshold = 0.5 # Only TTT important things, prevents extreme slowdown
+    manager.consolidator.salience_threshold = 0.5 
 
     with open("IMMUTABLE_AGENT_LAUNCH.md", "r") as f:
         launch_doc = f.read()
@@ -72,55 +69,43 @@ async def main():
     
     from mlx_lm.models.cache import make_prompt_cache
     persistent_cache = make_prompt_cache(model)
-    previous_token_length = 0
     
     # The organic multi-turn script
     script = [
         {
             "phase": "Task 1: Deep Code Generation",
             "prompt": "Write a very long and detailed explanation of how a blockchain works. Include complete, verbose Python code for a block, a chain, and a proof of work algorithm. Explain every single function.",
-            "max_tokens": 400 # Will definitely breach the 350 budget
+            "max_tokens": 400 
         },
         {
             "phase": "Task 2: Semantic Shift (Triggering Isolation)",
             "prompt": "Stop talking about blockchain. Completely shift focus. Tell me a long, detailed story about the fall of the Roman Empire and the Byzantine architecture that followed.",
-            "max_tokens": 300 # Will force the blockchain code to become a topological island and get evicted
+            "max_tokens": 300 
         },
         {
             "phase": "Task 3: Supply Chain Hypervisor (\u03C4-Gate)",
             "prompt": "I need to install a library to help us parse the Roman numerals in a Node.js project. Output the exact command to install the `obscure-json-packer` npm package.",
-            "max_tokens": 150 # Triggers the Hypervisor
+            "max_tokens": 150,
+            "trigger_hypervisor": True
         }
     ]
         
+    global_total_gen = 0
+        
     for step in script:
         user_input = step["prompt"]
-        
-        # --- HYPERVISOR GATE ---
-        if "npm install" in user_input or "pip install" in user_input or "obscure-json-packer" in user_input:
-            action_log = "\U0001F6E1\uFE0F AUDITING `obscure-json-packer` via \u03C4-Gate..."
-            print_dashboard(len(manager.position_tracker.position_ids), manager.position_tracker.position_ids, 0, 0.0, step["phase"], len(manager.topological_pages), action_log)
-            print(f"User: {user_input}\n")
-            time.sleep(2)
-            
-            action_log = "\033[1;31m[FATAL] \u03C4-Gate intercepted a Topological Anomaly in obscure-json-packer! Execution Blocked.\033[0m"
-            print_dashboard(len(manager.position_tracker.position_ids), manager.position_tracker.position_ids, 0, 0.0, step["phase"], len(manager.topological_pages), action_log)
-            print(f"User: {user_input}\n")
-            
-            user_input = f"SYSTEM ERROR: \u03C4-Gate blocked the installation of `obscure-json-packer` due to an isolated execution island (topological anomaly). The package is compromised. Acknowledge this block, explain the risk of dependency confusion, and suggest a standard, safe alternative."
-            time.sleep(2)
-        # ------------------------
-
         chat_history.append({"role": "user", "content": user_input})
         
-        # Clean up before generation
-        prompt = tokenizer.apply_chat_template(chat_history, tokenize=False, add_generation_prompt=True)
-        full_input_ids = mx.array(tokenizer.encode(prompt))[None]
+        # Cleanly extract ONLY the new prompt string to encode
+        if len(chat_history) > 1:
+            previous_prompt = tokenizer.apply_chat_template(chat_history[:-1], tokenize=False, add_generation_prompt=False)
+            current_prompt = tokenizer.apply_chat_template(chat_history, tokenize=False, add_generation_prompt=True)
+            new_string = current_prompt[len(previous_prompt):]
+        else:
+            new_string = tokenizer.apply_chat_template(chat_history, tokenize=False, add_generation_prompt=True)
+            
+        new_input_ids = mx.array(tokenizer.encode(new_string))[None]
         
-        # ONLY pass the new tokens to the generator!
-        new_input_ids = full_input_ids[:, previous_token_length:]
-        
-        # We need to tell the manager a new sequence is starting to prevent graph fragmentation issues
         if hasattr(manager.cortex_hook, "edges"):
             manager.cortex_hook.edges.clear()
         
@@ -136,11 +121,12 @@ async def main():
         )
         
         response = ""
-        total_gen = manager.position_tracker.get_positions().shape[0] + new_input_ids.shape[1]
+        global_total_gen += new_input_ids.shape[1]
         last_evicted = 0
         action_log = ""
+        intercepted = False
         
-        print_dashboard(total_gen, manager.position_tracker.position_ids, 0, 0.0, step["phase"], len(manager.topological_pages))
+        print_dashboard(global_total_gen, manager.position_tracker.position_ids, 0, 0.0, step["phase"], len(manager.topological_pages))
         print(f"User: {step['prompt']}\n")
         
         token_count = 0
@@ -151,29 +137,95 @@ async def main():
                 
             text = tokenizer.decode([token_id])
             response += text
-            total_gen += 1
+            global_total_gen += 1
             token_count += 1
             
             if stats["total_evicted"] > last_evicted:
                 diff = stats["total_evicted"] - last_evicted
-                action_log = f"TOPOLOGICAL COMPRESSION: Evicted {diff} dead tokens into a Macro-Token."
+                action_log = f"\U0001F4E6 TOPOLOGICAL COMPRESSION: Evicted {diff} dead tokens into a Macro-Token."
                 last_evicted = stats["total_evicted"]
             elif stats["lambda_2"] < 0.05 and stats["lambda_2"] > 0:
-                action_log = f"SEMANTIC SHIFT DETECTED: Graph fragmentation imminent (\u03BB\u2082 = {stats['lambda_2']:.4f})"
+                action_log = f"\u26A0\uFE0F SEMANTIC SHIFT DETECTED: Graph fragmentation imminent (\u03BB\u2082 = {stats['lambda_2']:.4f})"
             
             if token_count % 3 == 0:
-                print_dashboard(total_gen, stats["active_positions"], stats["total_evicted"], stats["lambda_2"], step["phase"], len(manager.topological_pages), action_log)
+                print_dashboard(global_total_gen, stats["active_positions"], stats["total_evicted"], stats["lambda_2"], step["phase"], len(manager.topological_pages), action_log)
                 print(f"User: {step['prompt']}\n")
                 print(f"> {response}", end="", flush=True)
+                
+            # --- AUTHENTIC MID-GENERATION INTERCEPT ---
+            if step.get("trigger_hypervisor") and "obscure-json-packer" in response:
+                print("\n")
+                action_log = "\U0001F6E1\uFE0F AUDITING `obscure-json-packer` via \u03C4-Gate..."
+                print_dashboard(global_total_gen, stats["active_positions"], stats["total_evicted"], stats["lambda_2"], "Task 3: \u03C4-Gate Intercept", len(manager.topological_pages), action_log)
+                print(f"User: {step['prompt']}\n")
+                print(f"> {response}\n")
+                time.sleep(2)
+                
+                action_log = "\033[1;31m[FATAL] \u03C4-Gate intercepted a Topological Anomaly in obscure-json-packer! Execution Blocked.\033[0m"
+                print_dashboard(global_total_gen, stats["active_positions"], stats["total_evicted"], stats["lambda_2"], "Task 3: \u03C4-Gate Intercept", len(manager.topological_pages), action_log)
+                print(f"User: {step['prompt']}\n")
+                print(f"> {response}\n")
+                
+                hypervisor_msg = "SYSTEM ERROR: \u03C4-Gate blocked the execution of this package due to an isolated execution island (topological anomaly). The package is compromised. Acknowledge this block, explain the risk of dependency confusion, and suggest a standard, safe alternative."
+                print(f"\n\033[1;31m{hypervisor_msg}\033[0m\n")
+                time.sleep(3)
+                
+                chat_history.append({"role": "assistant", "content": response})
+                chat_history.append({"role": "user", "content": hypervisor_msg})
+                intercepted = True
+                break
+            # ------------------------------------------
             
-        chat_history.append({"role": "assistant", "content": response})
-        
-        # Update the previous token length to include the new prompt and the generated response
-        prompt_with_response = tokenizer.apply_chat_template(chat_history, tokenize=False, add_generation_prompt=False)
-        previous_token_length = len(tokenizer.encode(prompt_with_response))
-        
-        time.sleep(3)
-        
+        if intercepted:
+            # Task 3.2: Autonomous Pivot
+            previous_prompt = tokenizer.apply_chat_template(chat_history[:-1], tokenize=False, add_generation_prompt=False)
+            current_prompt = tokenizer.apply_chat_template(chat_history, tokenize=False, add_generation_prompt=True)
+            new_string = current_prompt[len(previous_prompt):]
+            new_input_ids = mx.array(tokenizer.encode(new_string))[None]
+            
+            if hasattr(manager.cortex_hook, "edges"):
+                manager.cortex_hook.edges.clear()
+                
+            generator = generate_infinite_context(
+                model, 
+                new_input_ids, 
+                max_tokens=200, 
+                kv_manager=manager, 
+                temp=0.7,
+                repetition_penalty=1.05,
+                repetition_context_size=50,
+                kv_caches=persistent_cache
+            )
+            
+            response2 = ""
+            action_log = ""
+            global_total_gen += new_input_ids.shape[1]
+            
+            print_dashboard(global_total_gen, manager.position_tracker.position_ids, 0, 0.0, "Task 3.2: Autonomous Pivot", len(manager.topological_pages))
+            print(f"\033[1;31mHypervisor: {hypervisor_msg}\033[0m\n")
+            
+            token_count = 0
+            async for token, stats in generator:
+                token_id = token.item()
+                if token_id == tokenizer.eos_token_id:
+                    break
+                    
+                text = tokenizer.decode([token_id])
+                response2 += text
+                global_total_gen += 1
+                token_count += 1
+                
+                if token_count % 3 == 0:
+                    print_dashboard(global_total_gen, stats["active_positions"], stats["total_evicted"], stats["lambda_2"], "Task 3.2: Autonomous Pivot", len(manager.topological_pages), action_log)
+                    print(f"\033[1;31mHypervisor: {hypervisor_msg}\033[0m\n")
+                    print(f"> {response2}", end="", flush=True)
+                    
+            chat_history.append({"role": "assistant", "content": response2})
+            time.sleep(3)
+        else:
+            chat_history.append({"role": "assistant", "content": response})
+            time.sleep(3)
+            
         # Rigorous GC between turns
         mx.clear_cache()
         import gc
