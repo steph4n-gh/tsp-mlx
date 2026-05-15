@@ -1,0 +1,2 @@
+/usr/bin/ar qc libtsp_core.a CMakeFiles/tsp_core.dir/sparse_cache.cpp.o CMakeFiles/tsp_core.dir/position_tracker.cpp.o CMakeFiles/tsp_core.dir/attention_hook.cpp.o
+/usr/bin/ranlib libtsp_core.a

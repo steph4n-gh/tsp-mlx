@@ -129,6 +129,10 @@ class MemoryConsolidator:
         B, n_heads, L, head_dim = v_island.shape
         v_target = v_island.transpose(0, 2, 1, 3).reshape(B, L, -1)
         
+        # 🛑 CRITICAL FIX: DETACH TENSORS FROM THE MAIN GRAPH 
+        x_island = mx.stop_gradient(x_island)
+        v_target = mx.stop_gradient(v_target)
+        
         def loss_fn(model_params):
             total_loss = 0
             for lora in self.lora_layers:

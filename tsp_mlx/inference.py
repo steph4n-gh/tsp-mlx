@@ -90,7 +90,8 @@ def patch_attention_for_extraction(model: nn.Module):
                 # 🛑 FIX: APPLY CAUSAL MASK AND SOFTMAX
                 L_q, L_k = scores.shape[2], scores.shape[3]
                 if L_q > 1:  
-                    causal_mask = mx.triu(mx.full((L_q, L_k), -float('inf')), k=1)
+                    mask_offset = L_k - L_q + 1 
+                    causal_mask = mx.triu(mx.full((L_q, L_k), -float('inf')), k=mask_offset)
                     scores = scores + causal_mask
 
                 attn_weights = mx.softmax(scores.astype(mx.float32), axis=-1).astype(scores.dtype)
@@ -106,24 +107,26 @@ def patch_attention_for_extraction(model: nn.Module):
 def generate_infinite_context(
     model: nn.Module, 
     prompt: mx.array, 
-    max_tokens: int = 1000
+    max_tokens: int = 1000,
+    kv_manager = None
 ) -> Generator[Tuple[mx.array, dict], None, None]:
     """
     Yields (token, stats_dict) for instrumentation.
     """
-    if not hasattr(model, '_tsp_kv_manager'):
-        # Use the default library path search logic in CortexHook
-        hook = CortexHook(eval_interval=16, threat_threshold=999999.0)
-        kv_manager = KVCacheManager(hook, model=model)
-        model._tsp_kv_manager = kv_manager
-
-        patch_rope_for_sparse_positions(model, kv_manager.position_tracker)
-        patch_attention_for_extraction(model)
-    else:
-        kv_manager = model._tsp_kv_manager
-        kv_manager.position_tracker.position_ids = []
-        kv_manager.position_tracker.current_pos = 0
-        kv_manager.cortex_hook.edges = set()
+    if kv_manager is None:
+        if not hasattr(model, '_tsp_kv_manager'):
+            # Use the default library path search logic in CortexHook
+            hook = CortexHook(eval_interval=16, threat_threshold=999999.0)
+            kv_manager = KVCacheManager(hook, model=model)
+            model._tsp_kv_manager = kv_manager
+    
+            patch_rope_for_sparse_positions(model, kv_manager.position_tracker)
+            patch_attention_for_extraction(model)
+        else:
+            kv_manager = model._tsp_kv_manager
+            kv_manager.position_tracker.position_ids = []
+            kv_manager.position_tracker.current_pos = 0
+            kv_manager.cortex_hook.edges = set()
 
     from mlx_lm.models.cache import make_prompt_cache
     kv_caches = make_prompt_cache(model)

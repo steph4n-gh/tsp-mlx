@@ -45,8 +45,9 @@ def patch_rope_for_sparse_positions(model: nn.Module, tracker: SparsePositionTra
                     else:
                         raise ValueError("RoPE layer must have base or _freqs")
                     
-                    costheta = mx.cos(theta)
-                    sintheta = mx.sin(theta)
+                    # 🛑 CRITICAL FIX: CAST BACK TO HIDDEN STATE DTYPE
+                    costheta = mx.cos(theta).astype(x.dtype)
+                    sintheta = mx.sin(theta).astype(x.dtype)
                     
                     for _ in range(x.ndim - 2):
                         costheta = mx.expand_dims(costheta, 0)

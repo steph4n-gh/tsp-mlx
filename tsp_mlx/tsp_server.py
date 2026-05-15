@@ -81,15 +81,22 @@ async def chat_completions(req: ChatRequest):
     print(f"\n[API] Received request: {len(input_ids[0])} context tokens.")
     
     seq_len = input_ids.shape[1]
-    manager = model.tsp_kv_manager
-    if not hasattr(manager.position_tracker, '_positions') or manager.position_tracker._positions.shape[0] == 0:
-        manager.position_tracker.step(seq_len)
-    else:
-        manager.position_tracker._positions = mx.array([], dtype=mx.int32)
-        manager.position_tracker.current_pos = 0
-        manager.position_tracker.step(seq_len)
+    
+    # 🛑 CRITICAL FIX: SCOPE MANAGER TO THE REQUEST
+    # We must instantiate a new tracker inside the chat_completions endpoint for each request
+    # so concurrent requests do not cross-contaminate the position_tracker arrays.
+    from mlx_lm.models.cache import make_prompt_cache
+    dummy_cache = make_prompt_cache(model)
+    _ = model(mx.array([[0]]), cache=dummy_cache)
+    head_dim = dummy_cache[0].keys.shape[-1]
+    
+    hook = CortexHook(eval_interval=10, threshold=0.9)
+    local_manager = KVCacheManager(hook, model=model, enable_compression=True, enable_consolidation=True, head_dim=head_dim)
+    local_manager.consolidator.salience_threshold = 0.0 
+    
+    local_manager.position_tracker.step(seq_len)
 
-    generator = generate_infinite_context(model, input_ids, max_tokens=req.max_tokens)
+    generator = generate_infinite_context(model, input_ids, max_tokens=req.max_tokens, kv_manager=local_manager)
     
     def stream_tokens():
         for token, stats in generator:

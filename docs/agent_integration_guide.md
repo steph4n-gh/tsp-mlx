@@ -60,10 +60,6 @@ app = FastAPI()
 print("Booting TSP API Harness...")
 model, tokenizer = load("mlx-community/Qwen2.5-Coder-14B-Instruct-4bit")
 
-# 2. Attach the TSP Brain
-hook = CortexHook(eval_interval=10, threshold=0.1)
-model.tsp_kv_manager = KVCacheManager(hook, model=model, enable_compression=True, enable_consolidation=True)
-
 class ChatRequest(BaseModel):
     messages: list
     stream: bool = False
@@ -73,7 +69,13 @@ async def chat_completions(req: ChatRequest):
     prompt = tokenizer.apply_chat_template(req.messages, tokenize=False, add_generation_prompt=True)
     input_ids = mx.array(tokenizer.encode(prompt))[None]
     
-    generator = generate_infinite_context(model, input_ids, max_tokens=1024)
+    # 2. Attach the TSP Brain (Scoped per-request for concurrency safety)
+    hook = CortexHook(eval_interval=10, threshold=0.1)
+    # Using deterministic SVD Compression (no training needed) and True TTT 
+    local_manager = KVCacheManager(hook, model=model, enable_compression=True, enable_consolidation=True)
+    local_manager.position_tracker.step(input_ids.shape[1])
+    
+    generator = generate_infinite_context(model, input_ids, max_tokens=1024, kv_manager=local_manager)
     
     def stream_tokens():
         for token, stats in generator:
