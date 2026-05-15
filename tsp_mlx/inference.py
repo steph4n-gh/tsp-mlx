@@ -105,7 +105,9 @@ async def generate_infinite_context(
     prompt: mx.array, 
     max_tokens: int = 1000,
     kv_manager = None,
-    temp: float = 0.0
+    temp: float = 0.0,
+    repetition_penalty: float = 1.1,
+    repetition_context_size: int = 20
 ) -> Generator[Tuple[mx.array, dict], None, None]:
     """
     Yields (token, stats_dict) for instrumentation.
@@ -135,18 +137,35 @@ async def generate_infinite_context(
     y = prompt
     total_evicted = 0
     lambda_2 = 0.0
+    history_tokens = []
     
     try:
         for i in range(max_tokens):
             kv_manager.position_tracker.step(y.shape[1])
             
             logits = model(y, cache=kv_caches)
+            logits = logits[:, -1, :]
+            
+            # --- Apply Repetition Penalty ---
+            if repetition_penalty > 1.0 and len(history_tokens) > 0:
+                recent_history = list(set(history_tokens[-repetition_context_size:]))
+                indices = mx.array(recent_history)
+                selected_logits = logits[0, indices]
+                selected_logits = mx.where(
+                    selected_logits < 0,
+                    selected_logits * repetition_penalty,
+                    selected_logits / repetition_penalty
+                )
+                logits[0, indices] = selected_logits
+            # --------------------------------
             
             if temp > 0:
-                logits_step = logits[:, -1, :] / temp
+                logits_step = logits / temp
                 y = mx.random.categorical(logits_step, num_samples=1)
             else:
-                y = mx.argmax(logits[:, -1, :], axis=-1, keepdims=True)
+                y = mx.argmax(logits, axis=-1, keepdims=True)
+                
+            history_tokens.append(y.item())
             
             # --- Topological Compression Unpack Trigger ---
             if hasattr(kv_manager, 'last_attention_matrix') and kv_manager.last_attention_matrix is not None and y.shape[1] == 1 and hasattr(kv_manager, 'topological_pages'):

@@ -25,9 +25,9 @@ async def main():
     
     # 1. Setup TSP with extremely aggressive pruning to force the demo
     manager = setup_tsp(model, head_dim=128, enable_compression=True, enable_consolidation=True)
-    manager.cortex_hook.base_interval = 5
-    manager.cortex_hook.threshold = 0.95
-    manager.consolidator.salience_threshold = 0.0 # Force TTT
+    manager.cortex_hook.base_interval = 16
+    manager.cortex_hook.threshold = 0.8
+    manager.consolidator.salience_threshold = 0.2 # TTT only for salient items
     
     chat_history = [
         {"role": "system", "content": "You are a Senior Cryptography Analyst. Your job is to read dense technical specifications and summarize their core vulnerabilities in exactly one sentence."}
@@ -54,9 +54,18 @@ async def main():
         input_ids = mx.array(tokenizer.encode(prompt))[None]
         
         # We use generate_infinite_context directly to utilize the shared manager
-        generator = generate_infinite_context(model, input_ids, max_tokens=100, kv_manager=manager, temp=0.7)
+        generator = generate_infinite_context(
+            model, 
+            input_ids, 
+            max_tokens=100, 
+            kv_manager=manager, 
+            temp=0.7, 
+            repetition_penalty=1.15,
+            repetition_context_size=50
+        )
         
         response_text = ""
+        token_count = 0
         async for token, stats in generator:
             token_id = token.item()
             if token_id == tokenizer.eos_token_id:
@@ -64,9 +73,10 @@ async def main():
             
             chunk = tokenizer.decode([token_id])
             response_text += chunk
+            token_count += 1
             
-            # Print dashboard every 10 tokens to reduce flicker
-            if len(response_text) % 10 == 0:
+            # Print dashboard every 5 tokens to reduce flicker but show progress
+            if token_count % 5 == 0:
                 print_dashboard(i, len(stats.get("active_positions", [])), stats.get("total_evicted", 0), len(manager.topological_pages))
                 print(f"> {response_text}")
 
