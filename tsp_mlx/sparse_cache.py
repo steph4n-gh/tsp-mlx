@@ -57,6 +57,7 @@ class KVCacheManager:
         self.enable_compression = enable_compression
         self.enable_consolidation = enable_consolidation
         self.holographic_pages = {}
+        self.untrusted_indices = set()
         
         if self.enable_compression:
             self.compressor_k, self.compressor_v = load_pretrained_autoencoders(head_dim)
@@ -142,18 +143,25 @@ class KVCacheManager:
             
             # --- V4 Memory Consolidation (Test-Time Training) ---
             if self.enable_consolidation and x is not None and x.shape[1] == attention_matrix.shape[-1]:
-                salience = self.consolidator.evaluate_salience(attention_matrix, island_physical_indices)
-                if salience > getattr(self.consolidator, "salience_threshold", 0.5):
-                    island_array = mx.array(island_physical_indices, dtype=mx.int32)
-                    
-                    # Extract the hidden states corresponding to the island tokens
-                    # x is [B, L, D]
-                    x_island = mx.take(x, island_array, axis=1)
-                    
-                    # We extract the target values for distillation
-                    v_island = mx.take(kv_caches[0].values if hasattr(kv_caches[0], "values") else kv_caches[0][1], island_array, axis=2)
-                    
-                    self.consolidator.consolidate(x_island, v_island)
+                # 🛑 FIX: "Read-Only" Sandboxing to prevent AI Trauma
+                has_untrusted = any(self.position_tracker.position_ids[i] in self.untrusted_indices for i in island_physical_indices)
+                
+                if not has_untrusted:
+                    salience = self.consolidator.evaluate_salience(attention_matrix, island_physical_indices)
+                    if salience > getattr(self.consolidator, "salience_threshold", 0.5):
+                        island_array = mx.array(island_physical_indices, dtype=mx.int32)
+                        
+                        # Extract the hidden states corresponding to the island tokens
+                        # x is [B, L, D]
+                        x_island = mx.take(x, island_array, axis=1)
+                        
+                        # We extract the target values for distillation
+                        v_island = mx.take(kv_caches[0].values if hasattr(kv_caches[0], "values") else kv_caches[0][1], island_array, axis=2)
+                        
+                        self.consolidator.consolidate(x_island, v_island)
+                else:
+                    import logging
+                    logging.getLogger("tsp_engine").info("[TSP] \U0001F6A8 Bypassed TTT Consolidation due to Untrusted (Read-Only) tokens in island.")
 
             # --- V3 Topological Compression ---
             if self.enable_compression and len(island_physical_indices) > 1:

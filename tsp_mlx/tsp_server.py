@@ -1,4 +1,6 @@
-from fastapi import FastAPI, Request
+import secrets
+from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import mlx.core as mx
@@ -9,17 +11,30 @@ from tsp_mlx.inference import generate_infinite_context
 from fastapi.responses import StreamingResponse
 import time
 import logging
+import json
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("tsp_server")
+
+API_KEY = secrets.token_hex(16)
+logger.info(f"============================================================")
+logger.info(f" \U0001F512 SECURE API KEY GENERATED: {API_KEY}")
+logger.info(f"============================================================")
+
+security = HTTPBearer()
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if credentials.credentials != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API Key")
+    return True
 
 app = FastAPI(title="\u03C4-Spectral Pruner API Harness")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost", "http://127.0.0.1"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -30,6 +45,7 @@ tokenizer = None
 class Message(BaseModel):
     role: str
     content: str
+    is_untrusted: bool = False
 
 class ChatRequest(BaseModel):
     model: str = "default"
@@ -38,7 +54,7 @@ class ChatRequest(BaseModel):
     max_tokens: int = 1024
     temperature: float = 0.7
 
-@app.get("/v1/models")
+@app.get("/v1/models", dependencies=[Depends(verify_token)])
 async def list_models():
     return {
         "object": "list",
@@ -52,7 +68,7 @@ async def list_models():
         ]
     }
 
-@app.get("/api/tags")
+@app.get("/api/tags", dependencies=[Depends(verify_token)])
 async def ollama_tags():
     return {
         "models": [
@@ -72,17 +88,33 @@ async def ollama_tags():
         ]
     }
 
-@app.post("/v1/chat/completions")
+@app.post("/v1/chat/completions", dependencies=[Depends(verify_token)])
 async def chat_completions(req: ChatRequest):
     global model, tokenizer
     if not model or not tokenizer:
         return {"error": "Model not loaded properly."}
 
-    messages_dict = [{"role": m.role, "content": m.content} for m in req.messages]
+    # Extract untrusted indices
+    untrusted_indices = set()
+    current_idx = 0
+    messages_dict = []
+    
+    for m in req.messages:
+        msg_dict = {"role": m.role, "content": m.content}
+        messages_dict.append(msg_dict)
+        # We need to approximate the token indices for this message.
+        # A full proper implementation would encode message by message, but for the prototype:
+        msg_tokens = tokenizer.encode(m.content)
+        if m.is_untrusted:
+            for i in range(len(msg_tokens)):
+                # Roughly offset by current_idx and role tokens
+                untrusted_indices.add(current_idx + i + 4) 
+        current_idx += len(msg_tokens) + 4 # Rough header size
+
     prompt = tokenizer.apply_chat_template(messages_dict, tokenize=False, add_generation_prompt=True)
     input_ids = mx.array(tokenizer.encode(prompt))[None]
     
-    print(f"\n[API] Received request: {len(input_ids[0])} context tokens.")
+    logger.info(f"Received request: {len(input_ids[0])} context tokens.")
     
     seq_len = input_ids.shape[1]
     
@@ -103,6 +135,7 @@ async def chat_completions(req: ChatRequest):
     
     hook = CortexHook(eval_interval=10, threshold=0.9)
     local_manager = KVCacheManager(hook, model=model, enable_compression=True, enable_consolidation=True, head_dim=head_dim)
+    local_manager.untrusted_indices = untrusted_indices
     local_manager.consolidator.salience_threshold = 0.0 
     model._tsp_kv_manager = local_manager
     

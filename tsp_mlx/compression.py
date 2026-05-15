@@ -9,6 +9,8 @@ class VarianceCompressor:
     def __init__(self, hidden_dim: int, tau_wiggle: float = 0.05):
         self.hidden_dim = hidden_dim
         self.tau_wiggle = tau_wiggle
+        # 🛑 FIX: Cryptographic Position Salting to prevent Holographic Spoofing
+        self.session_salt = mx.random.normal((1, 1, 1, hidden_dim)) * 0.1 + 1.0
         
     def __call__(self, island_tensors: mx.array) -> mx.array:
         """
@@ -21,9 +23,12 @@ class VarianceCompressor:
         if L <= 1:
             return island_tensors
             
+        # Salt the tensors to prevent predictable spoofing
+        salted_tensors = island_tensors * self.session_salt
+            
         # Center the data across sequence length (axis 2), preserving Batch
-        mean_x = mx.mean(island_tensors, axis=2, keepdims=True)
-        centered_x = island_tensors - mean_x
+        mean_x = mx.mean(salted_tensors, axis=2, keepdims=True)
+        centered_x = salted_tensors - mean_x
         
         # Compute the variance of each token vector from the mean.
         # Highly variant tokens carry more 'signal' than average tokens.
