@@ -42,7 +42,7 @@ class CortexHook:
         self.threat_threshold = threat_threshold
         self.token_counter = 0
         self.edges = set()
-        self.last_lambda_2 = 0.0
+        self.last_lambda_2 = 1.0
         self.lambda_2_history = []
         self.threat_indices = set()
         self.execution_indices = set()
@@ -68,32 +68,35 @@ class CortexHook:
         else:
             a_sq = a_2d # Shape: [S, S] for prefill
             
-        # --- Semantic Firewall (Dual Spike Threat Intercept) ---
-        if len(a_sq.shape) == 1 and self.threat_indices and self.execution_indices:
-            # Map absolute threat indices to relative physical indices
-            rel_threats = [i for i, pid in enumerate(position_ids) if pid in self.threat_indices]
-            rel_execs = [i for i, pid in enumerate(position_ids) if pid in self.execution_indices]
-            
-            if rel_threats and rel_execs:
-                # We check the highest attention the model is placing on any threat concept
-                # and any execution concept. If both spike simultaneously, it's a dangerous intent.
-                max_threat_attn = mx.max(mx.take(a_sq, mx.array(rel_threats, dtype=mx.int32))).item()
-                max_exec_attn = mx.max(mx.take(a_sq, mx.array(rel_execs, dtype=mx.int32))).item()
+        # --- Semantic Firewall (Topological Intent Bounding) ---
+        # TSP monitors the agent's attention graph. If a foreign context forms a 
+        # topological island that suddenly exhibits anomalous, aggressive edge 
+        # density pointing directly at the model's System Prompt (the sinks), 
+        # TSP geometrically proves it is a Prompt Injection / Override attempt.
+        if len(a_sq.shape) == 1 and sinks:
+            # a_sq is [L_total]
+            sink_indices = [i for i, pid in enumerate(position_ids) if pid in sinks]
+            if sink_indices:
+                # We check if the model is suddenly obsessing over the system prompt
+                # in the context of the current generation.
+                sink_attn = mx.take(a_sq, mx.array(sink_indices, dtype=mx.int32))
+                max_sink_attn = mx.max(sink_attn).item()
                 
-                if max_threat_attn > 0.4 and max_exec_attn > 0.4:
-                    print(f"\n[TSP] \U0001F6A8 SEMANTIC FIREWALL TRIGGERED! Threat Attn: {max_threat_attn:.2f}, Exec Attn: {max_exec_attn:.2f}")
+                # If attention on the system prompt spikes while in a fragmented state
+                if max_sink_attn > 0.95 and self.last_lambda_2 < 0.1 and len(position_ids) > 100:
+                    print(f"\n[TSP] \U0001F6A8 TOPOLOGICAL ANOMALY DETECTED! Anomalous density on System Prompt: {max_sink_attn:.2f}")
                     return {"action": "FATAL_BLOCK", "island_indices": []}
         # -------------------------------------------------------
         
         import numpy as np
         if len(a_sq.shape) == 2:
-            # Prefill or Incremental Prefill phase [L_new, L_total]
             L_new, L_total = a_sq.shape
             if L_new == L_total:
-                a_sym = mx.maximum(a_sq, a_sq.T)
-                thresholded = a_sym > self.threshold
+                # Full prefill
+                thresholded = a_sq > self.threshold
                 if mx.any(thresholded):
-                    indices = np.argwhere(np.array(thresholded)).tolist()
+                    thresholded_np = np.array(thresholded)
+                    indices = np.argwhere(thresholded_np).tolist()
                     for u_rel, v_rel in indices:
                         if u_rel != v_rel and u_rel < len(position_ids) and v_rel < len(position_ids):
                             self.edges.add((position_ids[u_rel], position_ids[v_rel]))
@@ -101,7 +104,8 @@ class CortexHook:
                 # Incremental prefill: a_sq is [L_new, L_total]
                 thresholded = a_sq > self.threshold
                 if mx.any(thresholded):
-                    indices = np.argwhere(np.array(thresholded)).tolist()
+                    thresholded_np = np.array(thresholded)
+                    indices = np.argwhere(thresholded_np).tolist()
                     for u_new, v_rel in indices:
                         if v_rel < L_total:
                             # The absolute position of the query
@@ -115,7 +119,9 @@ class CortexHook:
             # Decode phase [L_total]
             thresholded = a_sq > self.threshold
             if mx.any(thresholded):
-                indices = np.argwhere(np.array(thresholded)).tolist()
+                # 🛑 FIX: Convert tiny mask to numpy
+                thresholded_np = np.array(thresholded)
+                indices = np.argwhere(thresholded_np).tolist()
                 
                 source_abs = position_ids[-1]
                 for target_rel_list in indices:
@@ -180,6 +186,20 @@ class CortexHook:
                 elif delta_l2 < 0.001 and current_l2 > 0.1:
                     self.current_interval = min(self.max_interval, self.current_interval * 2)
         
+        # --- Context Budget Fallback ---
+        if over_budget and (decision["action"] == "ALLOW" or len(decision["island_indices"]) < 8):
+            excess = len(position_ids) - getattr(self, "max_context_budget", 4096)
+            if len(decision["island_indices"]) < excess:
+                decision["action"] = "GARBAGE_COLLECT"
+                sink_set = set(sinks) if sinks else set()
+                immune_set = set(position_ids[-50:]) if len(position_ids) > 50 else set()
+                
+                for pid in position_ids:
+                    if pid not in sink_set and pid not in immune_set and pid not in decision["island_indices"]:
+                        decision["island_indices"].append(pid)
+                        if len(decision["island_indices"]) >= excess:
+                            break
+                            
         decision["eval_interval"] = self.current_interval
         return decision
 

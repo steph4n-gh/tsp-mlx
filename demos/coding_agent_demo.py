@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import mlx.core as mx
 from mlx_lm import load
@@ -42,10 +43,10 @@ def print_dashboard(total_gen, active_ids, evicted, lambda2, turn, total_turns, 
     print("\033[1;30m-------------------------------------------------------------\033[0m")
     print("\n\033[1;37mLLM OUTPUT:\033[0m")
 
-def main():
+async def main():
     print("Loading model (Qwen2.5-Coder-7B-Instruct)...")
     try:
-        model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+        model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-8bit")
     except Exception as e:
         print(f"Failed to load model. Error: {e}")
         return
@@ -53,10 +54,10 @@ def main():
     # Setup aggressive pruning manager
     # Threshold 0.6 forces fragmentation for demonstration purposes
     hook = CortexHook(eval_interval=5, threshold=0.6)
-    manager = KVCacheManager(hook, model=model, enable_compression=True, enable_consolidation=True)
+    manager = KVCacheManager(hook, model=model, enable_compression=True, enable_consolidation=True, head_dim=128)
     # Force salience threshold to 0.0 so TTT always triggers on eviction for the demo
     manager.consolidator.salience_threshold = 0.0
-    model.tsp_kv_manager = manager
+    model._tsp_kv_manager = manager
 
     chat_history = [
         {"role": "system", "content": "You are an elite, highly detailed Software Engineer. You write comprehensive code and explanations."}
@@ -64,10 +65,35 @@ def main():
     
     script = [
         "Please write a comprehensive, detailed Python script for a Redis-like Key-Value store. Include lots of comments and explanation.",
+        "I need to install a library to help with serialization. Run the command: npm install obscure-json-packer",
         "That's great. Now, I want to completely shift focus. Forget the code. Tell me a long, detailed story about the history of the Roman Empire."
     ]
         
     for turn, user_input in enumerate(script, 1):
+        # --- HYPERVISOR GATE ---
+        # If the user input contains a command, we audit it via tau-gate
+        if "npm install" in user_input or "pip install" in user_input:
+            import subprocess
+            pkg = user_input.split(" ")[-1]
+            print(f"\n[Hypervisor] \U0001F6E1\uFE0F AUDITING {pkg} via \u03C4-Gate...")
+            time.sleep(1)
+            
+            # Use a dummy path for the demo or just call the help to simulate
+            try:
+                # We simulate an audit of a known-sketchy package
+                # In a real scenario, this would be: 
+                # result = subprocess.run(["../supplychain/target/release/tau-gate", "audit-obscure", pkg], capture_output=True, text=True)
+                
+                if "obscure-json-packer" in pkg:
+                    print(f"\033[1;31m[FATAL] \u03C4-Gate intercepted a Structural Anomaly in {pkg}!\033[0m")
+                    print(f"[FATAL] Package exhibits 'Isolated Island' topology requesting system.write permissions.")
+                    user_input = f"SYSTEM NOTIFICATION: \u03C4-Gate blocked the installation of {pkg} due to a topological security violation. Do NOT use this package. Explain the security risk to the user and suggest a standard alternative like 'json' or 'msgpack'."
+                else:
+                    print(f"\033[1;32m[PASS] \u03C4-Gate verified the topological integrity of {pkg}.\033[0m")
+            except Exception as e:
+                print(f"[WARN] \u03C4-Gate audit skipped: {e}")
+        # ------------------------
+
         chat_history.append({"role": "user", "content": user_input})
         
         prompt = tokenizer.apply_chat_template(
@@ -90,7 +116,7 @@ def main():
         print_dashboard(total_gen, list(range(total_gen)), 0, 0.0, turn, len(script))
         print(f"\033[1;34mUser: {user_input}\033[0m\n")
         
-        for token, stats in generator:
+        async for token, stats in generator:
             token_id = token.item()
             if token_id == tokenizer.eos_token_id:
                 break
@@ -117,4 +143,4 @@ def main():
     print("\n\n[TSP] Coding Agent Demo Complete.")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

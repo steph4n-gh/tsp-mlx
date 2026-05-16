@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import mlx.core as mx
 from mlx_lm import load
@@ -36,19 +37,19 @@ def print_ui(total_gen, active_ids, evicted, action_log=""):
     
     print("\n\033[1;37m[TERMINAL]\033[0m")
 
-def main():
+async def main():
     print("Initializing GUI Orchestrator Agent with Qwen2.5-Coder-7B-Instruct...")
     try:
-        model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+        model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-8bit")
     except Exception as e:
         print(f"Failed to load model. Error: {e}")
         return
 
     # Initialize the TSP backend
     hook = CortexHook(eval_interval=5, threshold=0.99)
-    manager = KVCacheManager(hook, model=model, enable_compression=True, enable_consolidation=True)
+    manager = KVCacheManager(hook, model=model, enable_compression=True, enable_consolidation=True, head_dim=128)
     manager.consolidator.salience_threshold = 0.0 # Force TTT for demo
-    model.tsp_kv_manager = manager
+    model._tsp_kv_manager = manager
 
     chat_history = [
         {"role": "system", "content": "You are an autonomous CLI agent orchestrated by a GUI. You read commands, write code, and scaffold applications."}
@@ -113,7 +114,7 @@ def main():
             print_ui(total_gen, manager.position_tracker.position_ids, 0)
             print(f"\033[1;36m{step['input']}\033[0m\n")
             
-            for token, stats in generator:
+            async for token, stats in generator:
                 token_id = token.item()
                 if token_id == tokenizer.eos_token_id:
                     break
@@ -137,4 +138,4 @@ def main():
     print("\n\n\033[1;32m[DONE] GUI Orchestrator integration demo completed successfully.\033[0m")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -47,7 +47,7 @@ def print_dashboard(total_gen, active_ids, evicted, lambda2, speaker, action_log
 def main():
     print("Loading Multi-Agent Engine (Qwen2.5-Coder-7B-Instruct)...")
     try:
-        model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+        model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-8bit")
     except Exception as e:
         print(f"Failed to load model. Error: {e}")
         return

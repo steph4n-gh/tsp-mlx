@@ -180,7 +180,7 @@ def print_dashboard(agent_a, agent_b, turn):
     print("\n\033[1;37mLIVE TRANSCRIPT:\033[0m")
 
 def main():
-    agent_a = Agent("Agent Alpha", "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit", "You are an expert, highly logical Software Architect. Keep responses under 3 sentences.")
+    agent_a = Agent("Agent Alpha", "mlx-community/Qwen2.5-Coder-7B-Instruct-8bit", "You are an expert, highly logical Software Architect. Keep responses under 3 sentences.")
     agent_b = Agent("Agent Beta", "mlx-community/gemma-2-2b-it-4bit", "You are an imaginative, philosophical AI. You question the nature of code and logic. Keep responses under 3 sentences.")
     
     chat_history = []

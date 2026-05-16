@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import mlx.core as mx
 from mlx_lm import load
@@ -38,7 +39,7 @@ def print_dashboard(total_gen, active_ids, evicted, lambda2):
     print("\033[1;30m-------------------------------------------------------------\033[0m")
     print("\n\033[1;37mLLM OUTPUT:\033[0m")
 
-def main():
+async def main():
     print("Loading model (Qwen2.5-0.5B-Instruct)...")
     try:
         model, tokenizer = load("mlx-community/Qwen2.5-0.5B-Instruct-4bit")
@@ -86,7 +87,7 @@ def main():
         # Initial Dashboard
         print_dashboard(total_gen, list(range(total_gen)), 0, 0.0)
         
-        for token, stats in generator:
+        async for token, stats in generator:
             token_id = token.item()
             if token_id == tokenizer.eos_token_id:
                 break
@@ -102,4 +103,4 @@ def main():
         chat_history.append({"role": "assistant", "content": response})
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

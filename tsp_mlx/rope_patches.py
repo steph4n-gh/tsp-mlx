@@ -25,21 +25,38 @@ def patch_rope_for_sparse_positions(model: nn.Module, tracker: SparsePositionTra
             rope_layer = attention.rope
             rope_cls = rope_layer.__class__
             
+            if "PatchedRoPE" in rope_cls.__name__:
+                continue # Already patched, prevent infinite recursion
+            
             class PatchedRoPE(rope_cls):
-                def __call__(self, x, offset):
-                    seq_len = x.shape[2]
+                # Save a reference to the original, un-patched call method
+                orig_call = rope_cls.__call__
+
+                def __call__(self, x, offset=0, **kwargs):
+                    seq_len = x.shape[2] # 🛑 FIX: The sequence length is at index 2
                     
+                    if seq_len > 1:
+                        # 🛑 THE PREFILL FIX: If cache is pruned, native cache.offset is wrong.
+                        if hasattr(model, "_tsp_kv_manager") and model._tsp_kv_manager is not None:
+                            true_offset = model._tsp_kv_manager.position_tracker.current_pos - seq_len
+                        else:
+                            true_offset = offset
+                        return PatchedRoPE.orig_call(self, x, offset=true_offset, **kwargs)
+
+                    # --- DECODE PHASE (L == 1) MANUAL SPARSE MATH ---
                     if hasattr(model, "_tsp_kv_manager") and model._tsp_kv_manager is not None:
                         current_tracker = model._tsp_kv_manager.position_tracker
                     else:
                         current_tracker = tracker
                         
                     all_positions = current_tracker.get_positions()
+                    
                     if all_positions.shape[0] < seq_len:
                         positions = mx.arange(offset, offset + seq_len, dtype=x.dtype)
                     else:
                         true_positions = all_positions[-seq_len:]
-                        positions = mx.array(true_positions, dtype=x.dtype)
+                        # Avoid allocating a new array buffer. `true_positions` is already an mx.array.
+                        positions = true_positions.astype(x.dtype)
                     
                     scale = getattr(self, "scale", 1.0)
                     scaled_positions = positions.astype(mx.float32) * scale
