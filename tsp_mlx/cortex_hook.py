@@ -12,7 +12,7 @@ class FFIPartitionResult(ctypes.Structure):
     ]
 
 class CortexHook:
-    def __init__(self, lib_path: str = None, eval_interval: int = 64, threshold: float = 0.015, threat_threshold: float = 999.0, max_context_budget: int = 4096):
+    def __init__(self, lib_path: str = None, eval_interval: int = 64, threshold: float = 0.015, threat_threshold: float = 999.0, max_context_budget: int = 2048):
         if lib_path is None:
             # Try to find the shared library in the supplychain target directory
             base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../supplychain/target/release"))
@@ -89,11 +89,18 @@ class CortexHook:
         # -------------------------------------------------------
         
         import numpy as np
+        
+        # 🛑 DYNAMIC THRESHOLD FIX:
+        # As context grows, attention dilutes. A hardcoded 0.015 threshold is fine for 100 tokens,
+        # but completely severs the graph at 8,000 tokens (where average attention is ~0.0001).
+        # We scale the threshold dynamically based on the current context length.
+        dynamic_threshold = min(self.threshold, 1.5 / max(1, len(position_ids)))
+        
         if len(a_sq.shape) == 2:
             L_new, L_total = a_sq.shape
             if L_new == L_total:
                 # Full prefill
-                thresholded = a_sq > self.threshold
+                thresholded = a_sq > dynamic_threshold
                 if mx.any(thresholded):
                     thresholded_np = np.array(thresholded)
                     indices = np.argwhere(thresholded_np).tolist()
@@ -102,7 +109,7 @@ class CortexHook:
                             self.edges.add((position_ids[u_rel], position_ids[v_rel]))
             else:
                 # Incremental prefill: a_sq is [L_new, L_total]
-                thresholded = a_sq > self.threshold
+                thresholded = a_sq > dynamic_threshold
                 if mx.any(thresholded):
                     thresholded_np = np.array(thresholded)
                     indices = np.argwhere(thresholded_np).tolist()
@@ -117,7 +124,7 @@ class CortexHook:
                                 self.edges.add((v_abs, u_abs))
         else:
             # Decode phase [L_total]
-            thresholded = a_sq > self.threshold
+            thresholded = a_sq > dynamic_threshold
             if mx.any(thresholded):
                 # 🛑 FIX: Convert tiny mask to numpy
                 thresholded_np = np.array(thresholded)
@@ -131,6 +138,21 @@ class CortexHook:
                     if source_abs != target_abs:
                         self.edges.add((source_abs, target_abs))
                         self.edges.add((target_abs, source_abs))
+                        
+        # 🛑 CAUSAL BACKBONE FIX (OPTIMIZED):
+        # We mathematically guarantee the graph stays fundamentally connected by chaining the active context.
+        if len(position_ids) > 1:
+            if len(a_sq.shape) == 2:
+                # Full Prefill: chain the incoming sequence block
+                L_new = a_sq.shape[0]
+                start_idx = max(1, len(position_ids) - L_new)
+                for i in range(start_idx, len(position_ids)):
+                    self.edges.add((position_ids[i], position_ids[i-1]))
+                    self.edges.add((position_ids[i-1], position_ids[i]))
+            else:
+                # Decode: O(1) instantaneous linkage for the newly generated token
+                self.edges.add((position_ids[-1], position_ids[-2]))
+                self.edges.add((position_ids[-2], position_ids[-1]))
                     
         over_budget = len(position_ids) > getattr(self, "max_context_budget", 4096)
         if self.token_counter % self.current_interval != 0 and not over_budget:
@@ -161,16 +183,20 @@ class CortexHook:
             current_l2 = res.connectivity_score
             self.last_lambda_2 = current_l2
             
-            if current_l2 < 0.1:
+            # 🛑 FIX: Fiedler values for massive chain graphs naturally approach ~10^-7 (0.0000).
+            # Do not force an early prune just because lambda_2 is low, otherwise we constantly evict.
+            # Only signal a prune if we physically run out of VRAM budget.
+            if over_budget:
                 decision["action"] = "GARBAGE_COLLECT"
-                sink_set = set(sinks)
-                for i in range(res.nodes_count):
-                    try:
-                        node_id = int(res.nodes[i].decode('utf-8'))
-                        if node_id not in sink_set:
-                            decision["island_indices"].append(node_id)
-                    except (ValueError, AttributeError):
-                        continue
+                
+            sink_set = set(sinks)
+            for i in range(res.nodes_count):
+                try:
+                    node_id = int(res.nodes[i].decode('utf-8'))
+                    if node_id not in sink_set:
+                        decision["island_indices"].append(node_id)
+                except (ValueError, AttributeError):
+                    continue
             
             self.lib.tau_gate_free_result(result_ptr)
             
@@ -183,7 +209,7 @@ class CortexHook:
                 delta_l2 = abs(self.lambda_2_history[-1] - self.lambda_2_history[-2])
                 if delta_l2 > 0.05:
                     self.current_interval = max(self.min_interval, self.current_interval // 2)
-                elif delta_l2 < 0.001 and current_l2 > 0.1:
+                elif delta_l2 < 0.001:
                     self.current_interval = min(self.max_interval, self.current_interval * 2)
         
         # --- Context Budget Fallback ---

@@ -99,19 +99,23 @@ class KVCacheManager:
             island_indices = decision.get("island_indices", [])
         
         # --- HARD CAP ENFORCEMENT ---
-        budget = getattr(self.cortex_hook, "max_context_budget", 4096)
+        budget = getattr(self.cortex_hook, "max_context_budget", 8192)
         if len(self.position_tracker.position_ids) > budget:
-            if action != "GARBAGE_COLLECT" or len(island_indices) < 50:
-                action = "GARBAGE_COLLECT"
-                seq_len = len(self.position_tracker.position_ids)
-                immune_window_size = min(50, seq_len)
-                immune_set = set(self.position_tracker.position_ids[-immune_window_size:])
-                sink_set = set(combined_sinks)
-                
+            action = "GARBAGE_COLLECT"
+            seq_len = len(self.position_tracker.position_ids)
+            immune_window_size = min(50, seq_len)
+            immune_set = set(self.position_tracker.position_ids[-immune_window_size:])
+            sink_set = set(combined_sinks)
+            
+            # 🛑 FIX: Dynamic Semantic Pruning
+            # If the Spectral Bisection algorithm found a natural "Thought Island" that is sufficiently 
+            # large, we prioritize dropping that exact mathematical cluster to preserve semantic purity
+            # when it gets averaged into a Macro-Token. 
+            # Only if the natural island is missing or too small do we fall back to a rigid 500-token chunk.
+            if len(island_indices) < 100:
                 island_indices = []
-                excess = len(self.position_tracker.position_ids) - budget + 50 # Prune enough to get safely under budget
-                # Prevent massive feature collapse by chunking large evictions
-                excess = min(excess, 500) 
+                excess = len(self.position_tracker.position_ids) - budget + 500 
+                excess = min(excess, 500) # Max 500 to prevent Macro-Token semantic collapse
                 
                 for pid in self.position_tracker.position_ids:
                     if pid not in sink_set and pid not in immune_set:
@@ -176,6 +180,7 @@ class KVCacheManager:
                     logging.getLogger("tsp_engine").info("[TSP] \U0001F6A8 Bypassed TTT Consolidation due to Untrusted (Read-Only) tokens in island.")
 
             # --- V3 Topological Compression ---
+            macro_pos_id = None
             if self.enable_compression and len(island_physical_indices) > 1:
                 # Compression disabled print to keep UI clean
                 macro_index = island_physical_indices[0]
@@ -231,12 +236,14 @@ class KVCacheManager:
                         if hasattr(cache, "max_size"):
                             cache.keys[:, :, :final_k.shape[2], :] = final_k
                             cache.values[:, :, :final_v.shape[2], :] = final_v
+                            if final_px is not None:
+                                cache.x_states[:, :final_px.shape[1], :] = final_px
                         else:
                             cache.keys = final_k
                             cache.values = final_v
+                            if final_px is not None:
+                                cache.x_states = final_px
                         cache.offset = final_k.shape[2]
-                        if final_px is not None:
-                            cache.x_states = final_px
                         pruned_caches.append(cache)
                     else:
                         if len(cache) >= 3:
@@ -280,12 +287,14 @@ class KVCacheManager:
                         if hasattr(cache, "max_size"):
                             cache.keys[:, :, :new_k.shape[2], :] = new_k
                             cache.values[:, :, :new_v.shape[2], :] = new_v
+                            if new_px is not None:
+                                cache.x_states[:, :new_px.shape[1], :] = new_px
                         else:
                             cache.keys = new_k
                             cache.values = new_v
+                            if new_px is not None:
+                                cache.x_states = new_px
                         cache.offset = new_k.shape[2]
-                        if new_px is not None:
-                            cache.x_states = new_px
                         pruned_caches.append(cache)
                     if is_tuple:
                         if len(cache) >= 3:
@@ -295,8 +304,32 @@ class KVCacheManager:
                 
                 self.position_tracker.prune(list(island_set))
             
-            # Prune edges
-            self.cortex_hook.edges = {e for e in self.cortex_hook.edges if e[0] not in island_set and e[1] not in island_set}
+            # Remap edges to the macro token instead of deleting them to prevent graph fragmentation
+            macro_id = macro_pos_id if (self.enable_compression and len(island_physical_indices) > 1) else None
+            
+            new_edges = set()
+            for u, v in self.cortex_hook.edges:
+                if u in island_set and v in island_set:
+                    continue # Internal island edge, drop
+                elif u in island_set:
+                    if macro_id is not None:
+                        new_edges.add((macro_id, v))
+                elif v in island_set:
+                    if macro_id is not None:
+                        new_edges.add((u, macro_id))
+                else:
+                    new_edges.add((u, v))
+                    
+            if macro_id is not None and len(self.position_tracker.position_ids) > 0:
+                # 🛑 CRITICAL FIX: Anchor the Macro-Token to the System Prompt (Sink 0)
+                # If an island is completely disconnected, the Macro-Token will also be disconnected,
+                # causing lambda_2 to permanently drop to 0.0 and triggering endless anomalies.
+                # Anchoring it artificially preserves graph continuity.
+                system_anchor = self.position_tracker.position_ids[0]
+                new_edges.add((macro_id, system_anchor))
+                new_edges.add((system_anchor, macro_id))
+                    
+            self.cortex_hook.edges = new_edges
             
             return pruned_caches
 
@@ -352,12 +385,14 @@ class KVCacheManager:
                 if hasattr(cache, "max_size"):
                     cache.keys[:, :, :final_k.shape[2], :] = final_k
                     cache.values[:, :, :final_v.shape[2], :] = final_v
+                    if final_px is not None:
+                        cache.x_states[:, :final_px.shape[1], :] = final_px
                 else:
                     cache.keys = final_k
                     cache.values = final_v
+                    if final_px is not None:
+                        cache.x_states = final_px
                 cache.offset = final_k.shape[2]
-                if final_px is not None:
-                    cache.x_states = final_px
                 unpacked_caches.append(cache)
             else:
                 if final_px is not None:

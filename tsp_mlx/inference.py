@@ -55,10 +55,17 @@ def patch_attention_for_extraction(model: nn.Module):
             B, L, _ = x.shape
 
             if x is not None and cache is not None:
-                if not hasattr(cache, 'x_states') or cache.x_states is None:
-                    cache.x_states = x
+                offset = getattr(cache, 'offset', 0)
+                if hasattr(cache, "max_size"):
+                    # Pre-allocate x_states buffer to match KVCache exactly
+                    if not hasattr(cache, 'x_states') or cache.x_states is None or cache.x_states.shape[1] < cache.max_size:
+                        cache.x_states = mx.zeros((B, cache.max_size, x.shape[2]), dtype=x.dtype)
+                    cache.x_states[:, offset:offset+L, :] = x
                 else:
-                    cache.x_states = mx.concatenate([cache.x_states, x], axis=1)
+                    if not hasattr(cache, 'x_states') or cache.x_states is None:
+                        cache.x_states = x
+                    else:
+                        cache.x_states = mx.concatenate([cache.x_states, x], axis=1)
 
             if L == 1 and hasattr(self.orig, "q_proj") and hasattr(self.orig, "k_proj") and hasattr(self.orig, "v_proj"):
                 if hasattr(model, '_tsp_kv_manager') and model._tsp_kv_manager is not None:
@@ -296,7 +303,8 @@ async def generate_infinite_context(
             stats = {
                 "active_positions": kv_manager.position_tracker.position_ids.copy(),
                 "total_evicted": total_evicted,
-                "lambda_2": lambda_2
+                "lambda_2": lambda_2,
+                "macro_tokens": len(getattr(kv_manager, 'topological_pages', {}))
             }
             yield y, stats
             

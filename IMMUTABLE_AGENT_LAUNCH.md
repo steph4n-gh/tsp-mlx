@@ -38,11 +38,11 @@ We built **TSP (τ-Spectral Pruner)** for MLX. It is an organic memory engine de
 **The How:**
 TSP intercepts the LLM's attention matrix and treats it as a graph. When VRAM gets tight, TSP uses the exact same Spectral Bisection math as τ-Gate to find "Thought Islands"—chunks of context (like an old log file) that the AI is no longer thinking about.
 
-Instead of throwing them away, TSP compresses the island into a dense semantic **"Macro-Token"** anchor. It then uses **True Test-Time Training (TTT)** to burn the essence of that forgotten context into the model's background neural weights via LoRA. 
+Instead of throwing them away, TSP implements a **Dual-System Fractal Memory**:
+1. **Topological Paging (The Conscious Memory):** The isolated context is paged to system RAM, leaving only a dense **Macro-Token** anchor in active VRAM. If the agent later pays high attention to that Macro-Token, the framework instantly "unpacks" the raw tokens back into VRAM for flawless factual recall.
+2. **True Test-Time Training (The Subconscious Memory):** Simultaneously, the engine runs 10 fast steps of gradient descent via LoRA (TTT) on the evicted tokens. This physically burns the "vibe", logic, and style of the forgotten context into the model's background neural weights, granting permanent intuition without consuming a single token of context budget.
 
-The model doesn't need to swap gigabytes of raw logs back into VRAM; it retrieves the semantic intuition directly from the compressed token and its dynamically updated background state. 
-
-**Because the mathematical bisection is offloaded to a zero-dependency Rust daemon via a direct C-FFI bridge, the $O(E)$ sparse iterative solver executes in microseconds. The LLM maintains native Apple Silicon generation speeds while memory is consolidated asynchronously.**
+**Because the mathematical bisection is offloaded to a zero-dependency Rust daemon via a direct C-FFI bridge, the $O(E)$ sparse iterative solver executes in microseconds. The LLM maintains native Apple Silicon generation speeds while memory is dynamically swapped and trained.**
 
 **The Result:** A 7B parameter agent can run endlessly on a MacBook Pro, read thousands of files, and never OOM. It achieves cluster-level context scaling locally.
 
