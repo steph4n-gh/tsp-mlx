@@ -75,17 +75,22 @@ class CortexHook:
         # TSP geometrically proves it is a Prompt Injection / Override attempt.
         if len(a_sq.shape) == 1 and sinks:
             # a_sq is [L_total]
-            sink_indices = [i for i, pid in enumerate(position_ids) if pid in sinks]
-            if sink_indices:
-                # We check if the model is suddenly obsessing over the system prompt
-                # in the context of the current generation.
-                sink_attn = mx.take(a_sq, mx.array(sink_indices, dtype=mx.int32))
-                max_sink_attn = mx.max(sink_attn).item()
-                
-                # If attention on the system prompt spikes while in a fragmented state
-                if max_sink_attn > 0.95 and self.last_lambda_2 < 0.1 and len(position_ids) > 100:
-                    print(f"\n[TSP] \U0001F6A8 TOPOLOGICAL ANOMALY DETECTED! Anomalous density on System Prompt: {max_sink_attn:.2f}")
-                    return {"action": "FATAL_BLOCK", "island_indices": []}
+            # 🛑 FIX: Ignore natural Attention Sinks (the first 4 tokens).
+            # The StreamingLLM paper proves models dump excess attention on tokens 0-3 naturally.
+            # We only flag if it obsesses over a specific system prompt token LATER in the sequence.
+            valid_sinks = [s for s in sinks if s > 3]
+            if valid_sinks:
+                sink_indices = [i for i, pid in enumerate(position_ids) if pid in valid_sinks]
+                if sink_indices:
+                    # We check if the model is suddenly obsessing over the system prompt
+                    # in the context of the current generation.
+                    sink_attn = mx.take(a_sq, mx.array(sink_indices, dtype=mx.int32))
+                    max_sink_attn = mx.max(sink_attn).item()
+                    
+                    # If attention on the system prompt spikes while in a fragmented state
+                    if max_sink_attn > 0.95 and self.last_lambda_2 < 0.1 and len(position_ids) > 100:
+                        print(f"\n[TSP] \U0001F6A8 TOPOLOGICAL ANOMALY DETECTED! Anomalous density on System Prompt: {max_sink_attn:.2f}")
+                        return {"action": "FATAL_BLOCK", "island_indices": []}
         # -------------------------------------------------------
         
         import numpy as np

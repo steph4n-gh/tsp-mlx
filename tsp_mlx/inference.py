@@ -128,6 +128,29 @@ def patch_attention_for_extraction(model: nn.Module):
                             model._tsp_kv_manager.layer_attn_accum = mx.maximum(model._tsp_kv_manager.layer_attn_accum, attn_weights)
                         
                     model._tsp_kv_manager.last_attention_matrix = model._tsp_kv_manager.layer_attn_accum 
+                    
+                    # 🛑 FIX: Eliminate Double Computation
+                    # Instead of throwing away the math and calling self.orig(), we finish the attention pass.
+                    if cache is not None:
+                        if hasattr(cache, "values"):
+                            v_cache = cache.values
+                            if v_cache is not None:
+                                offset = getattr(cache, 'offset', v_cache.shape[2])
+                                v_cache = v_cache[:, :, :offset, :]
+                                full_values = mx.concatenate([v_cache, values], axis=2)
+                            else:
+                                full_values = values
+                        else:
+                             full_values = values
+                    else:
+                        full_values = values
+
+                    if n_heads != n_kv_heads:
+                        full_values = mx.repeat(full_values, repeats, axis=1)
+
+                    context = (attn_weights @ full_values).transpose(0, 2, 1, 3).reshape(B, L, -1)
+                    if hasattr(self.orig, "o_proj"):
+                        return self.orig.o_proj(context)
             
             return self.orig(x, mask=mask, cache=cache, **kwargs)
 
