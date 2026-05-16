@@ -1,4 +1,1 @@
-# Override GitHub's Linguist language statistics to reflect the core architecture
-# Mark the Python MLX wrappers and demo scripts as 'vendored' so they don't skew the stats
-*.py linguist-vendored
-tsp_mlx/* linguist-vendored
+

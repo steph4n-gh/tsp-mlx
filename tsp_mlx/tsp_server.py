@@ -16,9 +16,9 @@ import json
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("tsp_server")
 
-API_KEY = secrets.token_hex(16)
+API_KEY = "tsp-dev-key"
 logger.info(f"============================================================")
-logger.info(f" \U0001F512 SECURE API KEY GENERATED: {API_KEY}")
+logger.info(f" \U0001F512 SECURE API KEY: {API_KEY}")
 logger.info(f"============================================================")
 
 security = HTTPBearer()
@@ -120,7 +120,7 @@ async def chat_completions(req: ChatRequest):
     
     from tsp_mlx.generate import generate_with_tsp
     
-    generator = generate_with_tsp(model, tokenizer, prompt, max_tokens=req.max_tokens, head_dim=128, untrusted_indices=untrusted_indices)
+    generator = generate_with_tsp(model, tokenizer, prompt, max_tokens=req.max_tokens, temp=req.temperature, head_dim=128, untrusted_indices=untrusted_indices)
 
     async def stream_tokens():
         nonlocal generator
@@ -129,7 +129,8 @@ async def chat_completions(req: ChatRequest):
                 safe_stats = {
                     "active_positions_count": len(stats.get("active_positions", [])),
                     "total_evicted": stats.get("total_evicted", 0),
-                    "lambda_2": stats.get("lambda_2", 0.0)
+                    "lambda_2": stats.get("lambda_2", 0.0),
+                    "macro_tokens": stats.get("macro_tokens", 0)
                 }
                 
                 data = {

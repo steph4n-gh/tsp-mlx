@@ -29,24 +29,11 @@ The goal of the `tsp-mlx` framework is to enable "Infinite Context" (Persistent 
 
 ---
 
-## v3.0: Variance Compression (Macro-Tokens)
+## v3.0 and v4.0: The Dual-System Fractal Architecture
 
-Currently, TSP deletes isolated context. In v3.0, we compress it. This provides an LLM with the ability to compress a large context block into dense tokens without losing access to the underlying statistical variance.
-
-### Implementation Plan:
-1.  **Boundary Detection (The Engine):** Utilize $\tau$-Gate's Fiedler Vector to identify the boundaries of a single, cohesive concept (a "Thought Island").
-2.  **Variance Compressor (The Core):** Implement a statistical compressor that computes the variance of hidden states within the island to generate a weighted average, projecting the island into a dense representation.
-3.  **Active Cache Synthesis:** When $\lambda_2$ drops, extract the Thought Island from the KV Cache. Pass it through the compressor to generate dense **Macro-Tokens**.
-
----
-
-## v4.0: Memory Consolidation (Test-Time Training)
-
-v4.0 enables transferring knowledge from short-term memory (KV Cache) to long-term memory (LoRA Weights).
+v3.0 and v4.0 work in tandem to completely solve context bloat by splitting the AI's memory into two distinct mechanisms: one for exact factual recall, and one for contextual intuition.
 
 ### Implementation Plan:
-1.  **Salience Trigger:** Modify $\tau$-Gate to score isolated islands based on "Salience" (the density of internal connections). 
-2.  **The Consolidation Hook:** If a highly salient island shifts out of the active context, we trigger an "Online Consolidation" event.
-3.  **Dynamic Auto-Tuning:** The engine detects the quantization level of the base model to dynamically configure gradient clipping and learning rates.
-4.  **Localized Backward Pass:** The MLX engine temporarily halts generation and runs a few steps of a backward pass exclusively on injected `LoRALinear` value projections, using the Thought Island as the training data.
-5.  **Persistent Learning:** The updated LoRA adapters are serialized to disk (`tsp_adapters.safetensors`). When the API server restarts, it automatically loads these adapters, ensuring the agent retains its consolidated knowledge across sessions.
+1.  **Topological Paging (Factual Recall):** When the `tau-gate` Fiedler Vector identifies an isolated "Thought Island" that must be pruned to save VRAM, it compresses that island into a single dense **Macro-Token** that remains in active VRAM. The raw tokens are saved to system RAM/Disk. If the agent later needs exact factual recall (e.g., "Dr. Xylophone Quasar"), attention naturally flows back to the Macro-Token, triggering the framework to "unpack" the raw tokens back into VRAM instantly.
+2.  **Test-Time Training (Contextual Intuition):** While the raw facts go to Paging, the mathematical *relationships* and *style* of the evicted tokens are distilled directly into the model's background weights. The engine temporarily halts generation and runs a fast 10-step backward pass exclusively on injected `LoRALinear` value projections (r=64) in the final layer. This ensures the agent retains the "vibe" and implicit context across sessions without taking up a single token of VRAM.
+3.  **Persistent Learning:** The updated LoRA adapters can be explicitly serialized to disk (`.safetensors`) by the frontend application. When the API server or script boots, it can optionally load these adapters, ensuring the agent retains its consolidated intuition across isolated sessions as an "Immutable Agent".
