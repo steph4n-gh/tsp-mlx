@@ -193,7 +193,8 @@ class KVCacheManager:
                 
                 pruned_caches = []
                 page_data = []
-                for cache in kv_caches:
+                for i in range(len(kv_caches)):
+                    cache = kv_caches[i]
                     is_tuple = isinstance(cache, tuple)
                     k = cache[0] if is_tuple else cache.keys
                     v = cache[1] if is_tuple else cache.values
@@ -202,25 +203,22 @@ class KVCacheManager:
                     k_island = mx.take(k, island_array, axis=2)
                     v_island = mx.take(v, island_array, axis=2)
                     
-                    k_macro = k_island[:, :, 0:1, :]
-                    v_macro = v_island[:, :, 0:1, :]
-                    
                     new_k = mx.contiguous(mx.take(k, keep_array, axis=2))
                     new_v = mx.contiguous(mx.take(v, keep_array, axis=2))
                     
                     new_macro_physical_idx = keep_indices.index(macro_index)
                     
-                    k_before = new_k[:, :, :new_macro_physical_idx, :]
-                    k_after  = new_k[:, :, new_macro_physical_idx + 1:, :]
-                    final_k  = mx.contiguous(mx.concatenate([k_before, k_macro, k_after], axis=2))
-                    
-                    v_before = new_v[:, :, :new_macro_physical_idx, :]
-                    v_after  = new_v[:, :, new_macro_physical_idx + 1:, :]
-                    final_v  = mx.contiguous(mx.concatenate([v_before, v_macro, v_after], axis=2))
-                    
                     if px is not None:
                         px_island = mx.take(px, island_array, axis=1)
-                        px_macro = px_island[:, 0:1, :]
+                        # 🛑 FIX: TRUE TOPOLOGICAL COMPRESSION
+                        # Instead of throwing away 499 tokens with a slice, we use the VarianceCompressor
+                        # to statistically extract the principal semantic component with stochastic wiggle.
+                        if not hasattr(self, "compressor_px"):
+                            from .compression import VarianceCompressor
+                            self.compressor_px = VarianceCompressor(hidden_dim=px.shape[-1], tau_wiggle=0.05)
+                        
+                        px_macro = self.compressor_px(px_island)
+                        
                         new_px = mx.contiguous(mx.take(px, keep_array, axis=1))
                         px_before = new_px[:, :new_macro_physical_idx, :]
                         px_after  = new_px[:, new_macro_physical_idx + 1:, :]
@@ -229,6 +227,20 @@ class KVCacheManager:
                     else:
                         final_px = None
                         page_data.append((k_island, v_island))
+                        
+                    # Since k and v are already RoPE rotated, averaging them directly causes phase cancellation.
+                    # If we don't have the original unrotated `px` to re-project, we fallback to slicing the first token
+                    # to serve as a positional anchor, while relying on the TTT LoRA updates to handle the actual semantic memory.
+                    k_macro = k_island[:, :, 0:1, :]
+                    v_macro = v_island[:, :, 0:1, :]
+                    
+                    k_before = new_k[:, :, :new_macro_physical_idx, :]
+                    k_after  = new_k[:, :, new_macro_physical_idx + 1:, :]
+                    final_k  = mx.contiguous(mx.concatenate([k_before, k_macro, k_after], axis=2))
+                    
+                    v_before = new_v[:, :, :new_macro_physical_idx, :]
+                    v_after  = new_v[:, :, new_macro_physical_idx + 1:, :]
+                    final_v  = mx.contiguous(mx.concatenate([v_before, v_macro, v_after], axis=2))
                     
                     if not is_tuple:
                         # Copy back
