@@ -411,5 +411,17 @@ class KVCacheManager:
                     unpacked_caches.append((final_k, final_v))
                 
         del self.topological_pages[macro_pos_id]
+        
+        # 🛑 CRITICAL FIX: Evaluate the unpacked KV Caches instantly
+        eval_targets_unpack = []
+        for cache in unpacked_caches:
+            if isinstance(cache, tuple):
+                eval_targets_unpack.extend([t for t in cache if t is not None])
+            else:
+                if hasattr(cache, "keys") and cache.keys is not None: eval_targets_unpack.append(cache.keys)
+                if hasattr(cache, "values") and cache.values is not None: eval_targets_unpack.append(cache.values)
+                if hasattr(cache, "x_states") and cache.x_states is not None: eval_targets_unpack.append(cache.x_states)
+        mx.eval(*eval_targets_unpack)
+        
         print(f"\n[TSP] \U0001F4E6 Topological Compression Triggered: Unpacked {len(pos_ids)} tokens back into active cache!")
         return unpacked_caches

@@ -78,7 +78,7 @@ def patch_attention_for_extraction(model: nn.Module):
                             cache.x_states = mx.concatenate([cache.x_states[:, :offset, :], new_x], axis=1)
                         cache.x_states[:, offset:offset+L, :] = x
 
-            if L == 1 and hasattr(self.orig, "q_proj") and hasattr(self.orig, "k_proj") and hasattr(self.orig, "v_proj"):
+            if hasattr(self.orig, "q_proj") and hasattr(self.orig, "k_proj") and hasattr(self.orig, "v_proj"):
                 if hasattr(model, '_tsp_kv_manager') and model._tsp_kv_manager is not None:
                     # ONLY run the manual projections if we are extracting the matrix
                     queries = self.orig.q_proj(x)
@@ -110,6 +110,15 @@ def patch_attention_for_extraction(model: nn.Module):
 
                     scale = 1.0 / mx.sqrt(queries.shape[-1])
                     scores = (queries * scale) @ full_keys.transpose(0, 1, 3, 2)
+                    
+                    if mask is not None:
+                        if isinstance(mask, str) and mask == "causal":
+                            import mlx.nn as nn
+                            causal_mask = nn.MultiHeadAttention.create_additive_causal_mask(scores.shape[-2])
+                            scores = scores + causal_mask.astype(scores.dtype)
+                        elif not isinstance(mask, str):
+                            scores = scores + mask
+                        
                     attn_weights = mx.softmax(scores.astype(mx.float32), axis=-1).astype(scores.dtype)
                     
                     if not hasattr(model._tsp_kv_manager, 'layer_scores_accum') or model._tsp_kv_manager.layer_scores_accum is None:
