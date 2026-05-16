@@ -179,7 +179,8 @@ async def chat_completions(req: ChatRequest):
                     "lambda_2": stats.get("lambda_2", 0.0),
                     "macro_tokens": stats.get("macro_tokens", 0),
                     "last_ttt_loss": stats.get("last_ttt_loss", 0.0),
-                    "max_context_budget": stats.get("max_context_budget", 2048)
+                    "max_context_budget": stats.get("max_context_budget", 2048),
+                    "macro_graph": stats.get("macro_graph", {"nodes": [], "edges": []})
                 }
                 
                 data = {

@@ -312,7 +312,11 @@ async def generate_infinite_context(
                 "lambda_2": lambda_2,
                 "macro_tokens": len(getattr(kv_manager, 'topological_pages', {})),
                 "last_ttt_loss": getattr(getattr(kv_manager, 'consolidator', None), 'last_ttt_loss', 0.0),
-                "max_context_budget": getattr(kv_manager.cortex_hook, "max_context_budget", 2048)
+                "max_context_budget": getattr(kv_manager.cortex_hook, "max_context_budget", 2048),
+                "macro_graph": kv_manager.cortex_hook.get_macro_graph(
+                    kv_manager.position_tracker.position_ids, 
+                    list(getattr(kv_manager, 'topological_pages', {}).keys())
+                )
             }
             yield y, stats
             

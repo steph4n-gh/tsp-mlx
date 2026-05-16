@@ -247,3 +247,46 @@ class CortexHook:
         decision["eval_interval"] = self.current_interval
         return decision
 
+    def get_macro_graph(self, position_ids: List[int], macro_ids: List[int]) -> Dict[str, Any]:
+        """
+        Compresses the raw edge graph into a macroscopic view.
+        Groups standard tokens into chunks (e.g. 0-99, 100-199) and keeps Macro-Tokens distinct.
+        """
+        chunk_size = 100
+        
+        nodes = {}
+        macro_set = set(macro_ids)
+        
+        # 1. Map absolute position IDs to Node IDs
+        pid_to_node = {}
+        for pid in position_ids:
+            if pid == 0:
+                node_id = "SYS"
+                nodes[node_id] = {"label": "[SYS]"}
+            elif pid in macro_set:
+                node_id = f"M{pid}"
+                nodes[node_id] = {"label": f"[M{pid}]"}
+            else:
+                chunk_idx = pid // chunk_size
+                node_id = f"C{chunk_idx}"
+                if node_id not in nodes:
+                    start_r = chunk_idx * chunk_size
+                    end_r = start_r + chunk_size - 1
+                    nodes[node_id] = {"label": f"[{start_r}-{end_r}]"}
+            pid_to_node[pid] = node_id
+            
+        # 2. Map edges between Nodes
+        compressed_edges = set()
+        for u, v in self.edges:
+            if u in pid_to_node and v in pid_to_node:
+                u_node = pid_to_node[u]
+                v_node = pid_to_node[v]
+                if u_node != v_node:
+                    compressed_edges.add(tuple(sorted([u_node, v_node])))
+                    
+        return {
+            "nodes": [ {"id": k, "label": v["label"]} for k, v in nodes.items() ],
+            "edges": [ {"source": u, "target": v} for u, v in compressed_edges ]
+        }
+
+
