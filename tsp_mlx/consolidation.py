@@ -177,16 +177,31 @@ class MemoryConsolidator:
                     print("[TSP] WARNING: frozen_outputs contains NaNs!")
                 frozen_outputs.append(frozen)
 
+            # 🛑 FIX: TTT Null Operation
+            # The previous logic trained the LoRA to exactly 0.0 because v_target == frozen_outputs.
+            # To perform actual Context Distillation, we must teach the LoRA to reconstruct the 
+            # semantic average of the evicted values when given the Macro-Token's hidden state.
+            macro_x = mx.mean(x_island, axis=1, keepdims=True)
+            macro_v_target = mx.mean(v_target, axis=1, keepdims=True)
+            
+            macro_x = mx.stop_gradient(macro_x)
+            macro_v_target = mx.stop_gradient(macro_v_target)
+            mx.eval(macro_x, macro_v_target)
+
             def loss_fn(model_params):
                 total_loss = 0
                 for i, lora in enumerate(self.lora_layers):
-                    # Optimized: Only compute the LoRA path during the optimization loop
-                    # Cast x_island to float32 to match FP32 lora weights
-                    x_island_32 = x_island.astype(mx.float32)
+                    # Pass the Macro-Token hidden state through the frozen projection
+                    frozen_macro_v = mx.stop_gradient(lora.linear(macro_x)).astype(mx.float32)
                     
-                    lora_res = (x_island_32 @ lora.lora_a @ lora.lora_b) * lora.scale
-                    v_pred = frozen_outputs[i].astype(mx.float32) + lora_res
-                    total_loss += mx.mean(mx.square(v_pred - v_target.astype(mx.float32)))
+                    # Pass the Macro-Token hidden state through the LoRA adapter
+                    lora_res = (macro_x.astype(mx.float32) @ lora.lora_a @ lora.lora_b) * lora.scale
+                    
+                    # The prediction is the combined output
+                    v_pred = frozen_macro_v + lora_res
+                    
+                    # The loss is how well the combined output matches the TRUE average of the evicted sequence
+                    total_loss += mx.mean(mx.square(v_pred - macro_v_target.astype(mx.float32)))
                 return total_loss / len(self.lora_layers)
 
             loss_and_grad_fn = nn.value_and_grad(self.model, loss_fn)

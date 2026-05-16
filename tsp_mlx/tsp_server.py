@@ -41,6 +41,9 @@ app.add_middleware(
 # Global state
 model = None
 tokenizer = None
+global_kv_manager = None
+global_kv_caches = None
+global_prompt = ""
 
 class Message(BaseModel):
     role: str
@@ -90,42 +93,86 @@ async def ollama_tags():
 
 @app.post("/v1/chat/completions", dependencies=[Depends(verify_token)])
 async def chat_completions(req: ChatRequest):
-    global model, tokenizer
+    global model, tokenizer, global_kv_manager, global_kv_caches, global_prompt
     if not model or not tokenizer:
         return {"error": "Model not loaded properly."}
 
-    # Extract untrusted indices
-    untrusted_indices = set()
-    current_idx = 0
-    messages_dict = []
-    
-    for m in req.messages:
-        msg_dict = {"role": m.role, "content": m.content}
-        messages_dict.append(msg_dict)
-        # We need to approximate the token indices for this message.
-        # A full proper implementation would encode message by message, but for the prototype:
-        msg_tokens = tokenizer.encode(m.content)
-        if m.is_untrusted:
-            for i in range(len(msg_tokens)):
-                # Roughly offset by current_idx and role tokens
-                untrusted_indices.add(current_idx + i + 4) 
-        current_idx += len(msg_tokens) + 4 # Rough header size
-
+    messages_dict = [{"role": m.role, "content": m.content} for m in req.messages]
     prompt = tokenizer.apply_chat_template(messages_dict, tokenize=False, add_generation_prompt=True)
-    input_ids = mx.array(tokenizer.encode(prompt))[None]
     
-    logger.info(f"Received request: {len(input_ids[0])} context tokens.")
-    
+    # 🛑 STATEFUL CACHE LOGIC: Diff the prompt to only process new tokens
+    is_continuation = False
+    if global_kv_caches is not None and prompt.startswith(global_prompt) and len(global_prompt) > 0:
+        new_string = prompt[len(global_prompt):]
+        input_ids = mx.array(tokenizer.encode(new_string))[None]
+        is_continuation = True
+        logger.info(f"Continuing session. Sliced {len(input_ids[0])} new tokens.")
+    else:
+        # Reset session
+        input_ids = mx.array(tokenizer.encode(prompt))[None]
+        
+        from tsp_mlx.generate import setup_tsp
+        from mlx_lm.models.cache import make_prompt_cache
+        
+        global_kv_manager = setup_tsp(model, head_dim=128, enable_compression=True, enable_consolidation=True)
+        global_kv_manager.consolidator.salience_threshold = 0.0
+        global_kv_caches = make_prompt_cache(model)
+        
+        # Initial dummy evaluate to prepare cache
+        dummy_logits = model(mx.array([[0]]), cache=global_kv_caches)
+        mx.eval(dummy_logits)
+        for c in global_kv_caches:
+            c.keys = None
+            c.values = None
+            
+        logger.info(f"New session started. Prefilling {len(input_ids[0])} tokens.")
+        
     seq_len = input_ids.shape[1]
     
-    from tsp_mlx.generate import generate_with_tsp
+    # Run the prefill for the new tokens
+    prefill_ids = input_ids[:, :-1] if is_continuation else input_ids[:, :-1]
+    # Wait, if is_continuation, input_ids contains just the new tokens. 
+    # Actually, input_ids[:, :-1] works for both, except if input_ids is length 1.
+    if prefill_ids.shape[1] > 0:
+        global_kv_manager.position_tracker.step(prefill_ids.shape[1])
+        if hasattr(model, "model"):
+            _ = model.model(prefill_ids, cache=global_kv_caches)
+        else:
+            _ = model(prefill_ids, cache=global_kv_caches)
+            
+        cache_tensors = []
+        for c in global_kv_caches:
+            if c.keys is not None: cache_tensors.append(c.keys)
+            if c.values is not None: cache_tensors.append(c.values)
+            if hasattr(c, 'x_states') and c.x_states is not None: cache_tensors.append(c.x_states)
+        mx.eval(*cache_tensors)
+        mx.synchronize()
+
+    # Create the generator for the final token
+    final_input = input_ids[:, -1:] if input_ids.shape[1] > 0 else mx.array([[tokenizer.eos_token_id]], dtype=mx.int32)
     
-    generator = generate_with_tsp(model, tokenizer, prompt, max_tokens=req.max_tokens, temp=req.temperature, head_dim=128, untrusted_indices=untrusted_indices)
+    generator = generate_infinite_context(
+        model, 
+        final_input, 
+        max_tokens=req.max_tokens, 
+        kv_manager=global_kv_manager, 
+        temp=req.temperature,
+        repetition_penalty=1.1,
+        kv_caches=global_kv_caches
+    )
 
     async def stream_tokens():
         nonlocal generator
+        global global_prompt
         try:
-            async for text, stats in generator:
+            full_response = ""
+            async for token, stats in generator:
+                token_id = token.item()
+                if token_id == tokenizer.eos_token_id:
+                    break
+                text = tokenizer.decode([token_id])
+                
+                full_response += text
                 safe_stats = {
                     "active_positions_count": len(stats.get("active_positions", [])),
                     "total_evicted": stats.get("total_evicted", 0),
@@ -139,6 +186,7 @@ async def chat_completions(req: ChatRequest):
                 }
                 yield f"data: {json.dumps(data)}\n\n"
             yield "data: [DONE]\n\n"
+            global_prompt = prompt + full_response
         finally:
             generator = None
 
@@ -147,8 +195,12 @@ async def chat_completions(req: ChatRequest):
     else:
         try:
             response_text = ""
-            async for text, stats in generator:
-                response_text += text
+            async for token, stats in generator:
+                token_id = token.item()
+                if token_id == tokenizer.eos_token_id:
+                    break
+                response_text += tokenizer.decode([token_id])
+            global_prompt = prompt + response_text
             return {
                 "id": "chatcmpl-tsp",
                 "object": "chat.completion",

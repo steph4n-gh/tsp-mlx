@@ -15,12 +15,20 @@ class VarianceCompressor:
     def __call__(self, island_tensors: mx.array) -> mx.array:
         """
         Compresses an island of tokens into a single Macro-Token.
-        island_tensors: [B, n_kv_heads, seq_len, head_dim]
-        Returns: [B, n_kv_heads, 1, head_dim]
+        Handles both 4D [B, n_kv_heads, seq_len, head_dim] and 3D [B, seq_len, hidden_dim] tensors.
+        Returns tensor of identical dimensionality with seq_len compressed to 1.
         """
+        was_3d = False
+        if len(island_tensors.shape) == 3:
+            # It's x_states: [B, L, D]
+            was_3d = True
+            island_tensors = mx.expand_dims(island_tensors, axis=1) # -> [B, 1, L, D]
+            
         B, H, L, D = island_tensors.shape
         
         if L <= 1:
+            if was_3d:
+                return mx.squeeze(island_tensors, axis=1)
             return island_tensors
             
         # Salt the tensors to prevent predictable spoofing
@@ -56,6 +64,9 @@ class VarianceCompressor:
         # Weighted sum: [B, H, 1, D]
         macro_token = mx.sum(island_tensors * weights, axis=2, keepdims=True)
         
+        if was_3d:
+            macro_token = mx.squeeze(macro_token, axis=1) # -> [B, 1, D]
+            
         return macro_token
 
 def load_pretrained_autoencoders(hidden_dim: int, tau_wiggle: float = 0.05):

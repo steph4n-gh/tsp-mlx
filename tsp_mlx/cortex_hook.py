@@ -50,6 +50,19 @@ class CortexHook:
     def evaluate_attention(self, attention_matrix: mx.array, sinks: List[int], position_ids: List[int]) -> Dict[str, Any]:
         self.token_counter += 1
         
+        # 🛑 FAST PATH (O(1) CAUSAL BACKBONE)
+        # Avoid ALL MLX evaluations/synchronizations during decode unless we hit an eval interval or budget limit.
+        # This prevents the CPU from stalling the GPU async pipeline on every single word.
+        is_decode = (attention_matrix.shape[2] == 1)
+        over_budget = len(position_ids) > getattr(self, "max_context_budget", 4096)
+        
+        if is_decode and len(position_ids) > 1:
+            self.edges.add((position_ids[-1], position_ids[-2]))
+            self.edges.add((position_ids[-2], position_ids[-1]))
+            
+        if is_decode and self.token_counter % self.current_interval != 0 and not over_budget:
+            return {"action": "ALLOW", "island_indices": []}
+        
         # --- VRAM Auto-Tuning ---
         # If the context is getting too large, we dynamically increase the threshold.
         # This makes the graph harder to connect, forcing fragmentation and eviction.
@@ -75,17 +88,22 @@ class CortexHook:
         # TSP geometrically proves it is a Prompt Injection / Override attempt.
         if len(a_sq.shape) == 1 and sinks:
             # a_sq is [L_total]
-            sink_indices = [i for i, pid in enumerate(position_ids) if pid in sinks]
-            if sink_indices:
-                # We check if the model is suddenly obsessing over the system prompt
-                # in the context of the current generation.
-                sink_attn = mx.take(a_sq, mx.array(sink_indices, dtype=mx.int32))
-                max_sink_attn = mx.max(sink_attn).item()
-                
-                # If attention on the system prompt spikes while in a fragmented state
-                if max_sink_attn > 0.95 and self.last_lambda_2 < 0.1 and len(position_ids) > 100:
-                    print(f"\n[TSP] \U0001F6A8 TOPOLOGICAL ANOMALY DETECTED! Anomalous density on System Prompt: {max_sink_attn:.2f}")
-                    return {"action": "FATAL_BLOCK", "island_indices": []}
+            # 🛑 FIX: Ignore natural Attention Sinks (the first 4 tokens).
+            # The StreamingLLM paper proves models dump excess attention on tokens 0-3 naturally.
+            # We only flag if it obsesses over a specific system prompt token LATER in the sequence.
+            valid_sinks = [s for s in sinks if s > 3]
+            if valid_sinks:
+                sink_indices = [i for i, pid in enumerate(position_ids) if pid in valid_sinks]
+                if sink_indices:
+                    # We check if the model is suddenly obsessing over the system prompt
+                    # in the context of the current generation.
+                    sink_attn = mx.take(a_sq, mx.array(sink_indices, dtype=mx.int32))
+                    max_sink_attn = mx.max(sink_attn).item()
+                    
+                    # If attention on the system prompt spikes while in a fragmented state
+                    if max_sink_attn > 0.95 and self.last_lambda_2 < 0.1 and len(position_ids) > 100:
+                        print(f"\n[TSP] \U0001F6A8 TOPOLOGICAL ANOMALY DETECTED! Anomalous density on System Prompt: {max_sink_attn:.2f}")
+                        return {"action": "FATAL_BLOCK", "island_indices": []}
         # -------------------------------------------------------
         
         import numpy as np
