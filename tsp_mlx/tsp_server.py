@@ -170,7 +170,7 @@ async def chat_completions(req: ChatRequest):
                 token_id = token.item()
                 if token_id == tokenizer.eos_token_id:
                     break
-                text = tokenizer.decode([token_id])
+                text = tokenizer.decode([token_id], skip_special_tokens=True)
                 
                 full_response += text
                 safe_stats = {
@@ -201,7 +201,7 @@ async def chat_completions(req: ChatRequest):
                 token_id = token.item()
                 if token_id == tokenizer.eos_token_id:
                     break
-                response_text += tokenizer.decode([token_id])
+                response_text += tokenizer.decode([token_id], skip_special_tokens=True)
             global_prompt = prompt + response_text
             return {
                 "id": "chatcmpl-tsp",
