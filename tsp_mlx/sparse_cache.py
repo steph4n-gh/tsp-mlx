@@ -52,8 +52,6 @@ class KVCacheManager:
     def __init__(self, cortex_hook, model: nn.Module = None, enable_compression: bool = True, enable_consolidation: bool = True, head_dim: int = 64):
         self.cortex_hook = cortex_hook
         self.position_tracker = SparsePositionTracker()
-        self.inherited_sinks = set()
-        self.inheritance_threshold = 0.8
         
         self.enable_compression = enable_compression
         self.enable_consolidation = enable_consolidation
@@ -71,29 +69,6 @@ class KVCacheManager:
         combined_sinks = sinks
 
         if attention_matrix is not None:
-            # --- Fuzzy Sinks Logic ---
-            a_2d = mx.mean(attention_matrix, axis=1)[0]
-            if len(a_2d.shape) == 2 and a_2d.shape[0] == 1:
-                a_sq = mx.squeeze(a_2d, axis=0) # Shape: [S] for decode
-            else:
-                a_sq = a_2d # Shape: [S, S] for prefill
-
-            if len(a_sq.shape) == 1:
-                # Avoid full numpy conversion for all elements. 
-                # Only transfer indices that meet the threshold.
-                mask = a_sq > self.inheritance_threshold
-                if mx.any(mask):
-                    import numpy as np
-                    high_attn_indices = np.argwhere(np.array(mask)).tolist()
-                    for rel_idx_list in high_attn_indices:
-                        rel_idx = rel_idx_list[0]
-                        if rel_idx < len(self.position_tracker.position_ids):
-                            abs_idx = self.position_tracker.position_ids[rel_idx]
-                            if abs_idx not in sinks:
-                                self.inherited_sinks.add(abs_idx)
-
-            combined_sinks = list(set(sinks) | self.inherited_sinks)
-    
             decision = self.cortex_hook.evaluate_attention(attention_matrix, combined_sinks, self.position_tracker.position_ids)
             action = decision.get("action", "ALLOW")
             island_indices = decision.get("island_indices", [])
@@ -105,22 +80,31 @@ class KVCacheManager:
             seq_len = len(self.position_tracker.position_ids)
             immune_window_size = min(50, seq_len)
             immune_set = set(self.position_tracker.position_ids[-immune_window_size:])
-            sink_set = set(combined_sinks)
             
-            # 🛑 FIX: Dynamic Semantic Pruning
+            # 🛑 FIX: Macro-Token Protection
+            # Macro-Tokens are dense semantic anchors that represent hundreds of compressed tokens.
+            # If we don't protect them, the engine will select them for eviction (since they are old),
+            # compress them AGAIN, and permanently overwrite the original topological page in RAM!
+            # We strictly add them to the sink_set so they are armor-plated in VRAM.
+            macro_token_ids = set(self.topological_pages.keys())
+            sink_set = set(combined_sinks) | macro_token_ids
+            
+            # 🛑 FIX: Enforced Deep Clean (Anti-Thrashing)
             # If the Spectral Bisection algorithm found a natural "Thought Island" that is sufficiently 
-            # large, we prioritize dropping that exact mathematical cluster to preserve semantic purity
-            # when it gets averaged into a Macro-Token. 
-            # Only if the natural island is missing or too small do we fall back to a rigid 500-token chunk.
-            if len(island_indices) < 100:
-                island_indices = []
-                excess = len(self.position_tracker.position_ids) - budget + 500 
-                excess = min(excess, 500) # Max 500 to prevent Macro-Token semantic collapse
-                
+            # large, we prioritize dropping that exact mathematical cluster to preserve semantic purity.
+            # However, if the natural island is smaller than 500 tokens, we must pad it with the oldest 
+            # available tokens to enforce a massive 500-token flush. This prevents the active context 
+            # from staying permanently glued to the budget limit (which maximizes O(N^2) GPU overhead).
+            target_eviction = len(self.position_tracker.position_ids) - budget + 500 
+            target_eviction = min(target_eviction, 500) # Max 500 to prevent Macro-Token semantic collapse
+            
+            if len(island_indices) < target_eviction:
+                existing_island = set(island_indices)
                 for pid in self.position_tracker.position_ids:
-                    if pid not in sink_set and pid not in immune_set:
+                    if pid not in sink_set and pid not in immune_set and pid not in existing_island:
                         island_indices.append(pid)
-                        if len(island_indices) >= excess:
+                        existing_island.add(pid)
+                        if len(island_indices) >= target_eviction:
                             break
         # ----------------------------
 
@@ -130,7 +114,7 @@ class KVCacheManager:
         if action == "GARBAGE_COLLECT" and len(island_indices) > 0:
             seq_len = len(self.position_tracker.position_ids)
             island_set = set(island_indices)
-            sink_set = set(combined_sinks)
+            sink_set = set(combined_sinks) | set(self.topological_pages.keys())
             
             # IMMUNE WINDOW: Protect the most recent 50 tokens (the active sentence/thought)
             immune_window_size = min(50, seq_len)
@@ -342,6 +326,20 @@ class KVCacheManager:
                 new_edges.add((system_anchor, macro_id))
                     
             self.cortex_hook.edges = new_edges
+            
+            # 🛑 CRITICAL FIX: Explicitly evaluate the reshaped KV Caches
+            # Since MLX uses lazy evaluation, `mx.take` operations remain as pending graph nodes.
+            # If we don't evaluate them here, the attention mechanism will re-run the massive prune graph
+            # on every single subsequent token generation, causing speed to plummet to < 3 tok/s.
+            eval_targets_prune = []
+            for cache in pruned_caches:
+                if isinstance(cache, tuple):
+                    eval_targets_prune.extend([t for t in cache if t is not None])
+                else:
+                    if hasattr(cache, "keys") and cache.keys is not None: eval_targets_prune.append(cache.keys)
+                    if hasattr(cache, "values") and cache.values is not None: eval_targets_prune.append(cache.values)
+                    if hasattr(cache, "x_states") and cache.x_states is not None: eval_targets_prune.append(cache.x_states)
+            mx.eval(*eval_targets_prune)
             
             return pruned_caches
 

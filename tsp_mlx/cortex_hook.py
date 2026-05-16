@@ -50,6 +50,19 @@ class CortexHook:
     def evaluate_attention(self, attention_matrix: mx.array, sinks: List[int], position_ids: List[int]) -> Dict[str, Any]:
         self.token_counter += 1
         
+        # 🛑 FAST PATH (O(1) CAUSAL BACKBONE)
+        # Avoid ALL MLX evaluations/synchronizations during decode unless we hit an eval interval or budget limit.
+        # This prevents the CPU from stalling the GPU async pipeline on every single word.
+        is_decode = (attention_matrix.shape[2] == 1)
+        over_budget = len(position_ids) > getattr(self, "max_context_budget", 4096)
+        
+        if is_decode and len(position_ids) > 1:
+            self.edges.add((position_ids[-1], position_ids[-2]))
+            self.edges.add((position_ids[-2], position_ids[-1]))
+            
+        if is_decode and self.token_counter % self.current_interval != 0 and not over_budget:
+            return {"action": "ALLOW", "island_indices": []}
+        
         # --- VRAM Auto-Tuning ---
         # If the context is getting too large, we dynamically increase the threshold.
         # This makes the graph harder to connect, forcing fragmentation and eviction.

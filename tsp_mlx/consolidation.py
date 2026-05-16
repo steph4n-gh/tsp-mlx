@@ -182,7 +182,7 @@ class MemoryConsolidator:
             # To perform actual Context Distillation, we must teach the LoRA to reconstruct the 
             # semantic average of the evicted values when given the Macro-Token's hidden state.
             macro_x = mx.mean(x_island, axis=1, keepdims=True)
-            macro_v_target = mx.mean(v_target, axis=2, keepdims=True)
+            macro_v_target = mx.mean(v_target, axis=1, keepdims=True)
             
             macro_x = mx.stop_gradient(macro_x)
             macro_v_target = mx.stop_gradient(macro_v_target)

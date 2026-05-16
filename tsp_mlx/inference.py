@@ -62,10 +62,21 @@ def patch_attention_for_extraction(model: nn.Module):
                         cache.x_states = mx.zeros((B, cache.max_size, x.shape[2]), dtype=x.dtype)
                     cache.x_states[:, offset:offset+L, :] = x
                 else:
+                    # 🛑 CRITICAL FIX: Dynamic Block Allocation for KVCache
+                    # KVCache does not have max_size. If we use mx.concatenate every step, it is O(N^2).
+                    # We replicate the KVCache's internal `step` logic (e.g. 256) to pre-allocate chunks.
+                    step = getattr(cache, 'step', 256)
                     if not hasattr(cache, 'x_states') or cache.x_states is None:
-                        cache.x_states = x
+                        alloc_L = ((L + step - 1) // step) * step
+                        cache.x_states = mx.zeros((B, alloc_L, x.shape[2]), dtype=x.dtype)
+                        cache.x_states[:, :L, :] = x
                     else:
-                        cache.x_states = mx.concatenate([cache.x_states, x], axis=1)
+                        current_capacity = cache.x_states.shape[1]
+                        if offset + L > current_capacity:
+                            alloc_L = ((L + step - 1) // step) * step
+                            new_x = mx.zeros((B, alloc_L, x.shape[2]), dtype=x.dtype)
+                            cache.x_states = mx.concatenate([cache.x_states[:, :offset, :], new_x], axis=1)
+                        cache.x_states[:, offset:offset+L, :] = x
 
             if L == 1 and hasattr(self.orig, "q_proj") and hasattr(self.orig, "k_proj") and hasattr(self.orig, "v_proj"):
                 if hasattr(model, '_tsp_kv_manager') and model._tsp_kv_manager is not None:
@@ -86,22 +97,16 @@ def patch_attention_for_extraction(model: nn.Module):
                         keys = self.orig.rope(keys, offset=current_offset)
                     
                     if cache is not None:
-                        if hasattr(cache, "keys"):
-                            k_cache = cache.keys
-                            if k_cache is not None:
-                                offset = getattr(cache, 'offset', k_cache.shape[2])
-                                k_cache = k_cache[:, :, :offset, :]
-                                full_keys = mx.concatenate([k_cache, keys], axis=2)
-                            else:
-                                full_keys = keys
-                        else:
-                             full_keys = keys 
+                        # 🛑 CRITICAL FIX: We MUST update the cache since we are bypassing self.orig()
+                        full_keys, full_values = cache.update_and_fetch(keys, values)
                     else:
                         full_keys = keys
+                        full_values = values
 
                     if n_heads != n_kv_heads:
                         repeats = n_heads // n_kv_heads
                         full_keys = mx.repeat(full_keys, repeats, axis=1)
+                        full_values = mx.repeat(full_values, repeats, axis=1)
 
                     scale = 1.0 / mx.sqrt(queries.shape[-1])
                     scores = (queries * scale) @ full_keys.transpose(0, 1, 3, 2)
@@ -131,23 +136,6 @@ def patch_attention_for_extraction(model: nn.Module):
                     
                     # 🛑 FIX: Eliminate Double Computation
                     # Instead of throwing away the math and calling self.orig(), we finish the attention pass.
-                    if cache is not None:
-                        if hasattr(cache, "values"):
-                            v_cache = cache.values
-                            if v_cache is not None:
-                                offset = getattr(cache, 'offset', v_cache.shape[2])
-                                v_cache = v_cache[:, :, :offset, :]
-                                full_values = mx.concatenate([v_cache, values], axis=2)
-                            else:
-                                full_values = values
-                        else:
-                             full_values = values
-                    else:
-                        full_values = values
-
-                    if n_heads != n_kv_heads:
-                        full_values = mx.repeat(full_values, repeats, axis=1)
-
                     context = (attn_weights @ full_values).transpose(0, 2, 1, 3).reshape(B, L, -1)
                     if hasattr(self.orig, "o_proj"):
                         return self.orig.o_proj(context)
@@ -190,8 +178,10 @@ async def generate_infinite_context(
         else:
             kv_manager = model._tsp_kv_manager
             
+    if not hasattr(kv_manager, 'total_evicted'):
+        kv_manager.total_evicted = 0
+        
     y = prompt
-    total_evicted = 0
     lambda_2 = 0.0
     history_tokens = []
     
@@ -276,56 +266,38 @@ async def generate_infinite_context(
             else:
                 y = mx.argmax(logits, axis=-1, keepdims=True)
                 
-            # 🛑 EXTRACT CACHES
-            cache_tensors = [c.keys for c in kv_caches if c.keys is not None] + \
-                            [c.values for c in kv_caches if c.values is not None]
-            
             if hasattr(kv_manager, 'last_attention_matrix') and kv_manager.last_attention_matrix is not None:
                 attn_matrix = kv_manager.last_attention_matrix
                 
-                # 🛑 CRITICAL FIX: Evaluate EVERYTHING in ONE PASS before hitting Python boundaries
-                eval_targets = [y, attn_matrix, kv_manager.position_tracker.get_positions()] + cache_tensors
+                # 🛑 CRITICAL FIX: Evaluate ONLY the required outputs. 
+                # MLX lazy evaluation automatically handles the KV cache.
+                eval_targets = [y, attn_matrix, kv_manager.position_tracker.get_positions()]
                 mx.eval(*eval_targets)
                 
                 # NOW safe to cross Python boundary
                 history_tokens.append(y.item())
                 
-                raw_caches = [(c.keys, c.values, getattr(c, 'x_states', None)) for c in kv_caches]
                 before_len = kv_manager.position_tracker.get_positions().shape[0]
                 
                 # (This runs instantly now because attn_matrix is fully realized in Metal)
-                pruned_raw_caches = kv_manager.update(attn_matrix, raw_caches, sinks=[0, 1, 2, 3, 4])
+                _ = kv_manager.update(attn_matrix, kv_caches, sinks=[0, 1, 2, 3, 4])
                 
                 after_len = kv_manager.position_tracker.get_positions().shape[0]
-                total_evicted += (before_len - after_len)
+                kv_manager.total_evicted += (before_len - after_len)
                 
                 if hasattr(kv_manager.cortex_hook, 'last_lambda_2'):
                     lambda_2 = kv_manager.cortex_hook.last_lambda_2
                 
-                if pruned_raw_caches is not raw_caches:
-                    for cache_obj, (pk, pv, px) in zip(kv_caches, pruned_raw_caches):
-                        cache_obj.keys = pk
-                        cache_obj.values = pv
-                        cache_obj.offset = pk.shape[2] 
-                        if px is not None:
-                            cache_obj.x_states = px
-                
                 kv_manager.last_attention_matrix = None
                 kv_manager.last_scores_matrix = None
                 
-                # Evaluate pruned cache so it's fully realized for the next loop
-                new_cache_tensors = [c.keys for c in kv_caches if c.keys is not None] + \
-                                    [c.values for c in kv_caches if c.values is not None] + \
-                                    [c.x_states for c in kv_caches if hasattr(c, 'x_states') and c.x_states is not None]
-                mx.eval(kv_manager.position_tracker.get_positions(), *new_cache_tensors)
-                
             else:
-                mx.eval(y, kv_manager.position_tracker.get_positions(), *cache_tensors)
+                mx.eval(y, kv_manager.position_tracker.get_positions())
                 history_tokens.append(y.item())
             
             stats = {
                 "active_positions": kv_manager.position_tracker.position_ids.copy(),
-                "total_evicted": total_evicted,
+                "total_evicted": kv_manager.total_evicted,
                 "lambda_2": lambda_2,
                 "macro_tokens": len(getattr(kv_manager, 'topological_pages', {}))
             }
