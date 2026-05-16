@@ -113,9 +113,11 @@ def patch_attention_for_extraction(model: nn.Module):
                     
                     if mask is not None:
                         if isinstance(mask, str) and mask == "causal":
-                            import mlx.nn as nn
-                            causal_mask = nn.MultiHeadAttention.create_additive_causal_mask(scores.shape[-2])
-                            scores = scores + causal_mask.astype(scores.dtype)
+                            L_new = scores.shape[-2]
+                            L_cache = scores.shape[-1]
+                            offset = L_cache - L_new
+                            causal_mask = mx.triu(mx.full((L_new, L_cache), -1e9, dtype=scores.dtype), k=offset + 1)
+                            scores = scores + causal_mask
                         elif not isinstance(mask, str):
                             scores = scores + mask
                         
@@ -308,7 +310,9 @@ async def generate_infinite_context(
                 "active_positions": kv_manager.position_tracker.position_ids.copy(),
                 "total_evicted": kv_manager.total_evicted,
                 "lambda_2": lambda_2,
-                "macro_tokens": len(getattr(kv_manager, 'topological_pages', {}))
+                "macro_tokens": len(getattr(kv_manager, 'topological_pages', {})),
+                "last_ttt_loss": getattr(getattr(kv_manager, 'consolidator', None), 'last_ttt_loss', 0.0),
+                "max_context_budget": getattr(kv_manager.cortex_hook, "max_context_budget", 2048)
             }
             yield y, stats
             

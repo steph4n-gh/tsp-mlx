@@ -177,7 +177,9 @@ async def chat_completions(req: ChatRequest):
                     "active_positions_count": len(stats.get("active_positions", [])),
                     "total_evicted": stats.get("total_evicted", 0),
                     "lambda_2": stats.get("lambda_2", 0.0),
-                    "macro_tokens": stats.get("macro_tokens", 0)
+                    "macro_tokens": stats.get("macro_tokens", 0),
+                    "last_ttt_loss": stats.get("last_ttt_loss", 0.0),
+                    "max_context_budget": stats.get("max_context_budget", 2048)
                 }
                 
                 data = {

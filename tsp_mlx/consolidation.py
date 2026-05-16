@@ -215,7 +215,9 @@ class MemoryConsolidator:
                 if step == 0:
                     print(f"[TSP]   Initial TTT Loss: {loss.item():.6f}")
 
-            print(f"[TSP]   Final TTT Loss: {loss.item():.6f}")
+            final_loss = loss.item()
+            self.last_ttt_loss = final_loss
+            print(f"[TSP]   Final TTT Loss: {final_loss:.6f}")
             print("[TSP]   Semantic manifold updated. Resuming generation.")
             
             # Activate the LoRA path now that weights have been updated
