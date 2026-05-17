@@ -224,6 +224,9 @@ async def generate_infinite_context(
             macro_scores.sort(reverse=True, key=lambda x: x[0])
             unpack_targets = [m_id for score, m_id in macro_scores[:3]]
 
+            if unpack_targets:
+                yield None, {"workflow_state": "UNPACK_MEM"}
+
             for target in unpack_targets:
                 kv_caches = kv_manager.unpack(target, kv_caches)
 
@@ -289,6 +292,12 @@ async def generate_infinite_context(
                 history_tokens.append(y.item())
                 
                 before_len = kv_manager.position_tracker.get_positions().shape[0]
+                budget = getattr(kv_manager.cortex_hook, "max_context_budget", 2048)
+                
+                if before_len > budget:
+                    yield None, {"workflow_state": "PRUNE_SPECTRAL"}
+                    yield None, {"workflow_state": "PRUNE_MACRO"}
+                    yield None, {"workflow_state": "TTT_DESCENT"}
                 
                 # (This runs instantly now because attn_matrix is fully realized in Metal)
                 _ = kv_manager.update(attn_matrix, kv_caches, sinks=[0, 1, 2, 3, 4])

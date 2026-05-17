@@ -167,10 +167,12 @@ async def chat_completions(req: ChatRequest):
         try:
             full_response = ""
             async for token, stats in generator:
-                token_id = token.item()
-                if token_id == tokenizer.eos_token_id:
-                    break
-                text = tokenizer.decode([token_id], skip_special_tokens=True)
+                text = ""
+                if token is not None:
+                    token_id = token.item()
+                    if token_id == tokenizer.eos_token_id:
+                        break
+                    text = tokenizer.decode([token_id], skip_special_tokens=True)
                 
                 full_response += text
                 safe_stats = {
@@ -182,6 +184,8 @@ async def chat_completions(req: ChatRequest):
                     "max_context_budget": stats.get("max_context_budget", 2048),
                     "macro_graph": stats.get("macro_graph", {"nodes": [], "edges": []})
                 }
+                if "workflow_state" in stats:
+                    safe_stats["workflow_state"] = stats["workflow_state"]
                 
                 data = {
                     "choices": [{"delta": {"content": text}}],
@@ -199,10 +203,11 @@ async def chat_completions(req: ChatRequest):
         try:
             response_text = ""
             async for token, stats in generator:
-                token_id = token.item()
-                if token_id == tokenizer.eos_token_id:
-                    break
-                response_text += tokenizer.decode([token_id], skip_special_tokens=True)
+                if token is not None:
+                    token_id = token.item()
+                    if token_id == tokenizer.eos_token_id:
+                        break
+                    response_text += tokenizer.decode([token_id], skip_special_tokens=True)
             global_prompt = prompt + response_text
             return {
                 "id": "chatcmpl-tsp",
