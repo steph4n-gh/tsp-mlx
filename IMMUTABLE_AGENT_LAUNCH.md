@@ -60,6 +60,9 @@ TSP monitors the agent's attention graph in real-time. If a foreign context (lik
 **External Security (Hypervisor Gate):**
 When the agent decides to use a tool to execute a terminal command (e.g., `npm install`), the Python wrapper intercepts the request. It forces the agent to ask the **τ-Gate Hypervisor** for permission. τ-Gate audits the requested package's topology; if it detects a structural anomaly, it feeds the block back to the LLM. The agent, now aware of the security risk, can autonomously pivot its strategy to a secure alternative.
 
+**The UI Evolution (Terminal OS):**
+The agent is driven by `tsp-terminal-ui`, a bespoke Textual frontend that serves as a control room. It visualizes the invisible: rendering real-time ASCII topological graphs of the agent's brain (God-View) and tracking Apple Silicon memory bandwidth limits. It natively features a **Subconscious Swarm** mode, enabling multiple agents to hot-swap their LoRA adapters on the fly to debate complex issues endlessly with zero extra VRAM overhead.
+
 **TSP** gives the agent the "Infinite Brain" to autonomously code forever on edge hardware.
 **τ-Gate** guarantees the agent will never poison its own environment.
 
