@@ -218,7 +218,8 @@ async def chat_completions(req: ChatRequest):
                     "macro_tokens": stats.get("macro_tokens", 0),
                     "last_ttt_loss": stats.get("last_ttt_loss", 0.0),
                     "max_context_budget": stats.get("max_context_budget", 2048),
-                    "macro_graph": stats.get("macro_graph", {"nodes": [], "edges": []})
+                    "macro_graph": stats.get("macro_graph", {"nodes": [], "edges": []}),
+                    "active_snapshot": req.tsp_snapshot or "default"
                 }
                 if "workflow_state" in stats:
                     safe_stats["workflow_state"] = stats["workflow_state"]
