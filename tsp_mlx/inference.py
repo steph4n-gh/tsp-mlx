@@ -113,9 +113,11 @@ def patch_attention_for_extraction(model: nn.Module):
                     
                     if mask is not None:
                         if isinstance(mask, str) and mask == "causal":
-                            import mlx.nn as nn
-                            causal_mask = nn.MultiHeadAttention.create_additive_causal_mask(scores.shape[-2])
-                            scores = scores + causal_mask.astype(scores.dtype)
+                            L_new = scores.shape[-2]
+                            L_cache = scores.shape[-1]
+                            offset = L_cache - L_new
+                            causal_mask = mx.triu(mx.full((L_new, L_cache), -1e9, dtype=scores.dtype), k=offset + 1)
+                            scores = scores + causal_mask
                         elif not isinstance(mask, str):
                             scores = scores + mask
                         
@@ -218,9 +220,23 @@ async def generate_infinite_context(
                 except ValueError:
                     pass
 
-            # Unpack the top 3 most relevant Macro-Tokens
+            # 🛑 ANTI-SPIRAL FIX: Unpack Throttle & Budget Headroom
             macro_scores.sort(reverse=True, key=lambda x: x[0])
-            unpack_targets = [m_id for score, m_id in macro_scores[:3]]
+            
+            # 1. Throttle: Only unpack a MAXIMUM of 1 Macro-Token per step to prevent VRAM spikes.
+            unpack_targets = [m_id for score, m_id in macro_scores[:1]]
+            
+            # 2. Headroom Check: Only unpack if we have at least 25% VRAM free.
+            # If the context is mostly full, unpacking 500 tokens instantly triggers a recursive pruning 
+            # Death Spiral. If we lack space, we must rely solely on the LoRA subconscious.
+            budget = getattr(kv_manager.cortex_hook, "max_context_budget", 2048)
+            current_len = len(kv_manager.position_tracker.position_ids)
+            
+            if current_len >= (budget * 0.75):
+                unpack_targets = [] # Abort unpack, rely on TTT.
+
+            if unpack_targets:
+                yield None, {"workflow_state": "UNPACK_MEM"}
 
             for target in unpack_targets:
                 kv_caches = kv_manager.unpack(target, kv_caches)
@@ -287,6 +303,12 @@ async def generate_infinite_context(
                 history_tokens.append(y.item())
                 
                 before_len = kv_manager.position_tracker.get_positions().shape[0]
+                budget = getattr(kv_manager.cortex_hook, "max_context_budget", 2048)
+                
+                if before_len > budget:
+                    yield None, {"workflow_state": "PRUNE_SPECTRAL"}
+                    yield None, {"workflow_state": "PRUNE_MACRO"}
+                    yield None, {"workflow_state": "TTT_DESCENT"}
                 
                 # (This runs instantly now because attn_matrix is fully realized in Metal)
                 _ = kv_manager.update(attn_matrix, kv_caches, sinks=[0, 1, 2, 3, 4])
@@ -308,7 +330,13 @@ async def generate_infinite_context(
                 "active_positions": kv_manager.position_tracker.position_ids.copy(),
                 "total_evicted": kv_manager.total_evicted,
                 "lambda_2": lambda_2,
-                "macro_tokens": len(getattr(kv_manager, 'topological_pages', {}))
+                "macro_tokens": len(getattr(kv_manager, 'topological_pages', {})),
+                "last_ttt_loss": getattr(getattr(kv_manager, 'consolidator', None), 'last_ttt_loss', 0.0),
+                "max_context_budget": getattr(kv_manager.cortex_hook, "max_context_budget", 2048),
+                "macro_graph": kv_manager.cortex_hook.get_macro_graph(
+                    kv_manager.position_tracker.position_ids, 
+                    list(getattr(kv_manager, 'topological_pages', {}).keys())
+                )
             }
             yield y, stats
             

@@ -34,6 +34,11 @@ class LoRALinear(nn.Module):
         # 🛑 SPEED FIX: Bypass flag.
         self.is_active = True
 
+    def reset(self):
+        self.lora_a = mx.random.normal((self.lora_a.shape[0], self.r), dtype=mx.float32) * 1e-3
+        self.lora_b = mx.zeros((self.r, self.lora_b.shape[1]), dtype=mx.float32)
+        mx.eval(self.lora_a, self.lora_b)
+
     def __call__(self, x):
         if not self.is_active:
             return self.linear(x)
@@ -215,7 +220,9 @@ class MemoryConsolidator:
                 if step == 0:
                     print(f"[TSP]   Initial TTT Loss: {loss.item():.6f}")
 
-            print(f"[TSP]   Final TTT Loss: {loss.item():.6f}")
+            final_loss = loss.item()
+            self.last_ttt_loss = final_loss
+            print(f"[TSP]   Final TTT Loss: {final_loss:.6f}")
             print("[TSP]   Semantic manifold updated. Resuming generation.")
             
             # Activate the LoRA path now that weights have been updated
@@ -247,3 +254,9 @@ class MemoryConsolidator:
             print(f"[TSP] \U0001F4BE Loaded persistent learning adapters from {path}")
         except Exception as e:
             print(f"[TSP] \U0001F6A8 Failed to load adapters: {e}")
+
+    def reset_adapters(self):
+        for lora in self.lora_layers:
+            lora.reset()
+            lora.is_active = True
+        print(f"[TSP] \U0001F195 Reset to fresh LoRA adapters.")

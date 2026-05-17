@@ -56,6 +56,31 @@ class ChatRequest(BaseModel):
     stream: bool = False
     max_tokens: int = 1024
     temperature: float = 0.7
+    tsp_snapshot: str = None
+
+class SnapshotRequest(BaseModel):
+    name: str
+
+@app.post("/v1/snapshot/save", dependencies=[Depends(verify_token)])
+async def save_snapshot(req: SnapshotRequest):
+    global global_kv_manager
+    if global_kv_manager and hasattr(global_kv_manager, "consolidator"):
+        path = f"{req.name}.safetensors"
+        global_kv_manager.consolidator.save_adapters(path)
+        return {"status": "success", "message": f"Snapshot saved to {path}"}
+    raise HTTPException(status_code=400, detail="TSP Manager not initialized.")
+
+@app.post("/v1/snapshot/load", dependencies=[Depends(verify_token)])
+async def load_snapshot(req: SnapshotRequest):
+    global global_kv_manager
+    if global_kv_manager and hasattr(global_kv_manager, "consolidator"):
+        path = f"{req.name}.safetensors"
+        import os
+        if os.path.exists(path):
+            global_kv_manager.consolidator.load_adapters(path)
+            return {"status": "success", "message": f"Snapshot loaded from {path}"}
+        raise HTTPException(status_code=404, detail="Snapshot not found.")
+    raise HTTPException(status_code=400, detail="TSP Manager not initialized.")
 
 @app.get("/v1/models", dependencies=[Depends(verify_token)])
 async def list_models():
@@ -127,6 +152,17 @@ async def chat_completions(req: ChatRequest):
             
         logger.info(f"New session started. Prefilling {len(input_ids[0])} tokens.")
         
+    if req.tsp_snapshot and global_kv_manager and hasattr(global_kv_manager, "consolidator"):
+        import os
+        path = f"{req.tsp_snapshot}.safetensors"
+        if os.path.exists(path):
+            global_kv_manager.consolidator.load_adapters(path)
+            logger.info(f"Dynamically hot-swapped LoRA snapshot: {req.tsp_snapshot}")
+        else:
+            global_kv_manager.consolidator.reset_adapters()
+            global_kv_manager.consolidator.save_adapters(path)
+            logger.info(f"Generated fresh LoRA snapshot: {req.tsp_snapshot}")
+        
     seq_len = input_ids.shape[1]
     
     # Run the prefill for the new tokens
@@ -167,18 +203,26 @@ async def chat_completions(req: ChatRequest):
         try:
             full_response = ""
             async for token, stats in generator:
-                token_id = token.item()
-                if token_id == tokenizer.eos_token_id:
-                    break
-                text = tokenizer.decode([token_id])
+                text = ""
+                if token is not None:
+                    token_id = token.item()
+                    if token_id == tokenizer.eos_token_id:
+                        break
+                    text = tokenizer.decode([token_id], skip_special_tokens=True)
                 
                 full_response += text
                 safe_stats = {
                     "active_positions_count": len(stats.get("active_positions", [])),
                     "total_evicted": stats.get("total_evicted", 0),
                     "lambda_2": stats.get("lambda_2", 0.0),
-                    "macro_tokens": stats.get("macro_tokens", 0)
+                    "macro_tokens": stats.get("macro_tokens", 0),
+                    "last_ttt_loss": stats.get("last_ttt_loss", 0.0),
+                    "max_context_budget": stats.get("max_context_budget", 2048),
+                    "macro_graph": stats.get("macro_graph", {"nodes": [], "edges": []}),
+                    "active_snapshot": req.tsp_snapshot or "default"
                 }
+                if "workflow_state" in stats:
+                    safe_stats["workflow_state"] = stats["workflow_state"]
                 
                 data = {
                     "choices": [{"delta": {"content": text}}],
@@ -196,10 +240,11 @@ async def chat_completions(req: ChatRequest):
         try:
             response_text = ""
             async for token, stats in generator:
-                token_id = token.item()
-                if token_id == tokenizer.eos_token_id:
-                    break
-                response_text += tokenizer.decode([token_id])
+                if token is not None:
+                    token_id = token.item()
+                    if token_id == tokenizer.eos_token_id:
+                        break
+                    response_text += tokenizer.decode([token_id], skip_special_tokens=True)
             global_prompt = prompt + response_text
             return {
                 "id": "chatcmpl-tsp",
