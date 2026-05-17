@@ -220,9 +220,20 @@ async def generate_infinite_context(
                 except ValueError:
                     pass
 
-            # Unpack the top 3 most relevant Macro-Tokens
+            # 🛑 ANTI-SPIRAL FIX: Unpack Throttle & Budget Headroom
             macro_scores.sort(reverse=True, key=lambda x: x[0])
-            unpack_targets = [m_id for score, m_id in macro_scores[:3]]
+            
+            # 1. Throttle: Only unpack a MAXIMUM of 1 Macro-Token per step to prevent VRAM spikes.
+            unpack_targets = [m_id for score, m_id in macro_scores[:1]]
+            
+            # 2. Headroom Check: Only unpack if we have at least 25% VRAM free.
+            # If the context is mostly full, unpacking 500 tokens instantly triggers a recursive pruning 
+            # Death Spiral. If we lack space, we must rely solely on the LoRA subconscious.
+            budget = getattr(kv_manager.cortex_hook, "max_context_budget", 2048)
+            current_len = len(kv_manager.position_tracker.position_ids)
+            
+            if current_len >= (budget * 0.75):
+                unpack_targets = [] # Abort unpack, rely on TTT.
 
             if unpack_targets:
                 yield None, {"workflow_state": "UNPACK_MEM"}
