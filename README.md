@@ -1,35 +1,30 @@
-# 🚀 τ-Spectral Pruner (TSP) for MLX
+# τ-Spectral Pruner (TSP) for MLX
 
-**An organic memory framework for MLX LLMs featuring Topological Paging, True Test-Time Training (TTT), and a zero-latency Rust core.**
+TSP is an experimental MLX memory-management and attention prototype. This repository contains a Python package, a separate C++ prototype, demos, and design documents. Claims about unlimited context, lossless recall, inference overhead, and prompt-injection protection in the older documents have not been established by the tests in this checkout.
 
-TSP prevents LLM Out-Of-Memory (OOM) crashes by treating the model's working memory as a mathematical graph. It autonomously pages out irrelevant context to RAM, giving local autonomous agents infinite context windows without relying on RAG or external databases.
+## Current checkout status
 
-**Target Hardware:** Built and optimized for Apple Silicon. The baseline target is a **MacBook Pro M4 Pro with 24GB RAM**. The $O(1)$ framework is highly efficient and perfectly acceptable on lower-end machines (e.g., M1/M2 with 8GB/16GB), but scales infinitely with more Unified Memory for massive topological paging.
+The Python package currently has an import blocker: `tsp_mlx/sparse_cache.py` annotates `model: nn.Module` but does not import `nn`. Because `tsp_mlx/__init__.py` imports that module, the generation example below should be treated as intended API, not a verified quick start. The repository's only checked-in Python test file uses synthetic attention arrays; it is not a performance or model-quality evaluation.
 
----
+The C++ build is separate from the Python package. Its [CMake configuration](cpp/CMakeLists.txt) refers to a `../../supplychain/target/release/libtau_gate.a` file and a specific `venv/lib/python3.14` location. Those paths are not supplied by this checkout.
 
-## ⚡ Quickstart
+## Python setup
 
-### 1. Installation
+On a compatible Apple Silicon environment, the dependencies declared in [pyproject.toml](pyproject.toml) can be installed from the repository root:
 
-```bash
-# Clone the repository
-git clone https://github.com/steph4n-gh/tsp-mlx
+```sh
+git clone https://github.com/steph4n-gh/tsp-mlx.git
 cd tsp-mlx
-
-# Build the Rust math engine (τ-Gate)
-cd ../supplychain
-cargo build --release
-
-# Setup Python Environment
-cd ../tsp-mlx
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt # or install mlx, mlx_lm manually
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
 ```
 
-### 2. The DX Wrapper
-Integrating TSP into your own MLX projects is incredibly simple. We provide a high-level wrapper that handles the complex math, caching, and garbage collection for you:
+There is no `requirements.txt` in this repository. The import blocker above must be resolved before the package API can be used.
+
+## Intended generation API
+
+The implementation of `generate_with_tsp` is in [tsp_mlx/generate.py](tsp_mlx/generate.py). After the package import issue is fixed, a caller can load an MLX model and pass it to this asynchronous generator:
 
 ```python
 import asyncio
@@ -38,54 +33,27 @@ from tsp_mlx.generate import generate_with_tsp
 
 async def main():
     model, tokenizer = load("mlx-community/Qwen2.5-Coder-7B-Instruct-8bit")
-    
-    # 🛑 Untrusted tokens bypass permanent learning to prevent poisoning
-    untrusted = {5, 6, 7} 
-
-    # A single line handles initialization, RoPE patching, and inference
-    generator = generate_with_tsp(
-        model, tokenizer, 
-        prompt="Write a haiku about a cybernetic dragon.", 
-        max_tokens=50, 
-        untrusted_indices=untrusted
-    )
-    
-    async for text, stats in generator:
+    async for text, stats in generate_with_tsp(
+        model, tokenizer,
+        prompt="Write a haiku about a cybernetic dragon.",
+        max_tokens=50,
+    ):
         print(text, end="", flush=True)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.run(main())
 ```
 
----
+The model download and this example have not been run as part of this documentation update.
 
-## ✨ Key Features
+## Documentation
 
-*   **Dual-System Fractal Memory:** 
-    *   **Topological Paging (Conscious Memory):** Instead of throwing context away, TSP compresses pruned islands into a dense semantic 'Macro-Token' anchor in VRAM, paging the raw text to RAM. If attention flows back to the Macro-Token, the raw tokens are instantly unpacked for flawless factual recall.
-    *   **True Test-Time Training (Subconscious Memory):** When context is evicted, the agent runs fast $O(1)$ gradient descent on injected `LoRALinear` adapters in the final layer. This physically burns the "vibe" and style of the forgotten context into the model's background neural weights.
-*   **Zero-Overhead Inference:** By using pre-allocated slice assignments for state tracking and dynamic attention thresholding, TSP runs at the physical memory bandwidth limits of Apple Silicon (~189 GB/s on an M4 Pro) adding 0.0% Python overhead to token decoding.
-*   **Massive Prefill & Seamless File Uploads:** Through mathematically correct `mx.triu` causal masking, TSP can ingest 15,000+ token codebase files in a single FlashAttention burst. The engine dynamically maps the new topology to your compressed Macro-Tokens in RAM, instantly triggering $O(1)$ factual recall if the uploaded file is related to a past memory.
-*   **Semantic Firewall:** Defends against adversarial memory poisoning via Read-Only sandboxing, and blocks prompt injection attempts by mathematically identifying topological anomalies pointing at the core System Prompt and dropping a `FATAL_BLOCK`.
+- [Architecture](docs/architecture.md)
+- [Agent integration guide](docs/agent_integration_guide.md)
+- [Research whitepaper](docs/whitepaper.md)
+- [Roadmap](ROADMAP.md)
 
----
-
-## 🧠 How It Works (Explain Like I'm 6)
-
-Imagine an AI is like a student taking a really, really long test. To answer the questions, the student has to keep all the information they've read inside a tiny backpack (their memory). 
-
-Normally, when the backpack gets full, the student either has to stop taking the test, or they have to throw away the *oldest* notes—even if those notes contain the most important instructions!
-
-**TSP is a smart organizer for the backpack.** Instead of throwing away the oldest notes, it looks at everything in the bag and figures out which notes are completely unrelated to what the student is thinking about *right now*. It zips those notes up and puts them in a locker (RAM). If the student ever needs them again, it instantly unzips them back into the backpack!
-
----
-
-## 📚 Documentation & Deep Dives
-
-*   **[📖 Read the Whitepaper](./docs/whitepaper.md)**: A formal breakdown of the organic engine, detailing Topological Pruning, Topological Compression, and Parametric Memory.
-*   **[🛠️ Agent Integration Guide](./docs/agent_integration_guide.md)**: How to cleanly integrate the TSP framework into your existing Python applications.
-*   **[What is TSP? (The Summary)](./docs/product_summary.md)**: An explanation of what the product is, what it does, and who it is for.
-*   **[Deep Dive: Context and Multi-Turn Survival](./docs/deep_dive.md)**: A technical guide on how TSP integrates with LLMs and mathematically curates context without breaking chat templates.
+These documents describe design goals and experiments; check implementation and current evidence before relying on operational claims.
 
 ## License
-MIT License.
+
+[MIT License](LICENSE).
